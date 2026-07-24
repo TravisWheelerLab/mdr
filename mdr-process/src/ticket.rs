@@ -1,28 +1,34 @@
 use crate::{
     process,
-    types::{ProcessArgs, Server, TicketArgs, TicketInfo},
+    types::{ProcessArgs, Server, SubmissionCompleteJson, TicketArgs, TicketInfo},
 };
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use chrono::Utc;
 use diesel::pg::PgConnection;
 use dotenvy::dotenv;
 //use libmdrepo::metadata::Meta;
+use libmdrepo::{
+    common::{get_md5, read_file},
+    constants::MAX_FILE_SIZE_BYTES,
+};
 use log::{debug, info};
 use mdr_db::{
-    models::{
-        NewUploadInstance, NewUploadMessage, TicketUpdate, UploadInstanceUpdate,
-    },
+    models::{NewUploadInstance, NewUploadMessage, TicketUpdate, UploadInstanceUpdate},
     ops,
 };
 use rayon::prelude::*;
 use std::{
-    env,
-    fs,
+    collections::BTreeMap,
+    env, fs,
     path::{Path, PathBuf},
     process::Command,
     time::Instant,
 };
 use which::which;
+
+/// Manifest the uploader writes into a landing directory once every file has
+/// been transferred, recording the size and MD5 of each.
+pub const COMPLETED_JSON: &str = "mdrepo-submission.completed.json";
 
 // --------------------------------------------------
 pub fn get_ticket_user(args: &TicketArgs) -> Result<TicketInfo> {
@@ -147,10 +153,12 @@ pub fn process(args: &TicketArgs) -> Result<()> {
 
     // Process every landing subdirectory in parallel. Each task opens its own
     // DB connection (a Diesel PgConnection can't be shared across threads), so
-    // parallelism is unchanged; we only collect per-landing success to decide
-    // whether the whole ticket is complete.
+    // parallelism is unchanged; we collect each landing's outcome -- `Ok(())`
+    // for success or `Err(reason)` describing the directory and its failure --
+    // so we can both decide whether the ticket is complete and report exactly
+    // which landings failed and why.
     let start = Instant::now();
-    let results: Vec<bool> = ticket_dirs
+    let results: Vec<std::result::Result<(), String>> = ticket_dirs
         .into_par_iter()
         .map(|ticket_dir| {
             process_landing(&ticket_dir, args, script_dir, &work_dir, writes)
@@ -158,8 +166,9 @@ pub fn process(args: &TicketArgs) -> Result<()> {
         .collect();
 
     // Only flip processing_complete when every landing succeeded.
-    let ok_count = results.iter().filter(|&&ok| ok).count();
-    let all_ok = !results.is_empty() && ok_count == results.len();
+    let failures: Vec<&String> =
+        results.iter().filter_map(|r| r.as_ref().err()).collect();
+    let all_ok = !results.is_empty() && failures.is_empty();
     if let Some(ctx) = writes {
         if all_ok {
             mark_ticket_complete(ctx);
@@ -178,17 +187,132 @@ pub fn process(args: &TicketArgs) -> Result<()> {
     );
 
     // Fail the whole run if any landing failed, so callers (and the exit code)
-    // see the failure rather than a false success.
+    // see the failure rather than a false success. List each failed directory
+    // and its error so the operator can act without re-running at debug level.
     if !all_ok {
         bail!(
-            "Ticket {ticket_id}: {} of {} director{} failed to process",
-            results.len() - ok_count,
+            "Ticket {ticket_id}: {} of {} director{} failed to process:\n{}",
+            failures.len(),
             results.len(),
-            if results.len() == 1 { "y" } else { "ies" }
+            if results.len() == 1 { "y" } else { "ies" },
+            failures
+                .iter()
+                .map(|reason| format!("  - {reason}"))
+                .collect::<Vec<_>>()
+                .join("\n")
         );
     }
 
     Ok(())
+}
+
+// --------------------------------------------------
+/// Check a landing directory's files against the manifest the uploader wrote.
+/// This is purely a transfer-integrity check -- it never parses the metadata
+/// TOML -- so an error here means the download is incomplete or corrupt, not
+/// that the submission itself is bad. Callers that cannot assume a manifest
+/// (any directory not fetched from a ticket) should test for `COMPLETED_JSON`
+/// before calling.
+pub fn check_manifest(dir: &Path) -> Result<Vec<String>> {
+    let completed_path = dir.join(COMPLETED_JSON);
+    if !completed_path.is_file() {
+        bail!(r#"Missing "{}""#, completed_path.display());
+    }
+
+    let completed: SubmissionCompleteJson =
+        serde_json::from_str(&read_file(&completed_path)?).map_err(|e| {
+            anyhow!(r#"Failed to parse "{}": {e}"#, completed_path.display())
+        })?;
+
+    if completed.total_filenum as usize != completed.files.len() {
+        bail!(
+            "Expected {} file(s) but completed JSON has {}",
+            completed.total_filenum,
+            completed.files.len()
+        );
+    }
+
+    // Ensure that some files were uploaded
+    if completed.files.is_empty() {
+        bail!(r#""{}" contains no "files"#, completed_path.display());
+    }
+
+    let mut errors = vec![];
+
+    // Keyed by MD5 so that two uploaded files with identical content can be
+    // reported together; ordered so the message is stable across runs.
+    let mut md5_hashes: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut total_file_size = 0;
+
+    // Check file hashes/sizes
+    for file in &completed.files {
+        total_file_size += file.size;
+
+        let path = dir.join(&file.irods_path);
+        if !path.exists() {
+            errors.push(format!(r#"Missing expected file "{}""#, file.irods_path));
+            continue;
+        }
+
+        let size = path.metadata()?.len();
+        let local_md5 = get_md5(&path)?;
+
+        debug!(
+            r#"Checking "{}" = expected md5 {}, size {}"#,
+            file.irods_path,
+            if file.md5_hash == local_md5 {
+                "OK"
+            } else {
+                "BAD"
+            },
+            if file.size == size { "OK" } else { "Bad" }
+        );
+
+        if file.md5_hash != local_md5 {
+            errors.push(format!(
+                r#""{}" MD5 "{}" does not match manifest "{}""#,
+                file.irods_path, local_md5, file.md5_hash
+            ));
+        }
+
+        if file.size != size {
+            errors.push(format!(
+                r#""{}" size "{}" does not match manifest "{}""#,
+                file.irods_path, size, file.size
+            ))
+        }
+
+        md5_hashes
+            .entry(local_md5)
+            .or_default()
+            .push(file.irods_path.clone());
+    }
+
+    for (hash, files) in md5_hashes {
+        if files.len() > 1 {
+            errors.push(format!(
+                r#"File hash "{hash}" is duplicated: [{}]"#,
+                files.join(", ")
+            ))
+        }
+    }
+
+    // The manifest should agree with itself.
+    if completed.total_filesize != total_file_size {
+        errors.push(format!(
+            r#""{}" total_filesize "{}" does not match the sum of its file sizes "{}""#,
+            COMPLETED_JSON, completed.total_filesize, total_file_size
+        ));
+    }
+
+    // Check max upload size
+    if total_file_size > MAX_FILE_SIZE_BYTES {
+        errors.push(format!(
+            "Total file size ({total_file_size}) exceeds limit {MAX_FILE_SIZE_BYTES}"
+        ));
+    }
+
+    Ok(errors)
 }
 
 // --------------------------------------------------
@@ -204,7 +328,7 @@ struct FeedbackCtx {
 
 // --------------------------------------------------
 /// The DSN env var for a given server.
-fn dsn_for(server: &Server) -> &'static str {
+pub(crate) fn dsn_for(server: &Server) -> &'static str {
     match server {
         Server::Production => "PRODUCTION_DSN",
         Server::Staging => "STAGING_DSN",
@@ -253,7 +377,7 @@ fn process_landing(
     script_dir: &Path,
     work_dir: &Path,
     feedback: Option<&FeedbackCtx>,
-) -> bool {
+) -> std::result::Result<(), String> {
     let ticket_start = Instant::now();
     debug!(r#"Processing ticket directory "{}""#, ticket_dir.display());
 
@@ -299,21 +423,35 @@ fn process_landing(
         }
     }
 
-    let outcome = process::process(&ProcessArgs {
-        input_dir: ticket_dir.to_path_buf(),
-        script_dir: Some(script_dir.to_path_buf()),
-        work_dir: Some(work_dir.to_path_buf()),
-        out_dir: None,
-        server: args.server.clone(),
-        reprocess_simulation_id: None,
-        // The TOML will have already been validated, so allow missing IDs
-        no_id: true,
-        force: args.force,
-        dry_run: args.dry_run,
-        replace_original_files: false,
-    });
+    // Verify the download against its manifest before processing. This must
+    // come first: processing rewrites the metadata TOML in place, so anything
+    // downstream is checking bytes we produced rather than bytes the submitter
+    // uploaded. Failing here also keeps the two failure classes apart -- these
+    // are transfer errors, whereas a later metadata error is the submission's.
+    let outcome = match check_manifest(ticket_dir) {
+        Ok(errors) if !errors.is_empty() => Err(anyhow!(
+            "Upload is incomplete or corrupt:\n{}",
+            errors.join("\n")
+        )),
+        Err(e) => Err(e),
+        Ok(_) => process::process(&ProcessArgs {
+            input_dir: ticket_dir.to_path_buf(),
+            script_dir: Some(script_dir.to_path_buf()),
+            work_dir: Some(work_dir.to_path_buf()),
+            out_dir: None,
+            server: args.server.clone(),
+            reprocess_simulation_id: None,
+            // The TOML will have already been validated, so allow missing IDs
+            no_id: true,
+            force: args.force,
+            dry_run: args.dry_run,
+            replace_original_files: false,
+            blast_num_threads: args.blast_num_threads,
+            ticket_id: Some(args.ticket_id as i64),
+        }),
+    };
 
-    let success = match &outcome {
+    let outcome = match &outcome {
         Ok(result) => {
             // process::process returns Ok only on success (fatal errors bail),
             // so this landing succeeded; warnings are non-fatal and are noted.
@@ -328,12 +466,7 @@ fn process_landing(
                     false,
                     false,
                 );
-                update_instance_result(
-                    conn,
-                    *upload_id,
-                    true,
-                    result.simulation_id,
-                );
+                update_instance_result(conn, *upload_id, true, result.simulation_id);
             }
             if !result.warnings.is_empty() {
                 info!(
@@ -342,7 +475,7 @@ fn process_landing(
                     result.warnings.join("\n")
                 );
             }
-            true
+            Ok(())
         }
         Err(e) => {
             if let Some((conn, upload_id)) = db.as_mut() {
@@ -359,7 +492,15 @@ fn process_landing(
                 r#"Error processing ticket directory "{}": {e}"#,
                 ticket_dir.display()
             );
-            false
+            // Return the directory and error so the caller can report which
+            // landings failed and why without a debug-level re-run. The error
+            // may be multi-line (e.g. a manifest mismatch); indent the tail so
+            // the summary's bulleted list stays readable.
+            Err(format!(
+                "{}: {}",
+                ticket_dir.display(),
+                e.to_string().replace('\n', "\n    ")
+            ))
         }
     };
 
@@ -368,7 +509,7 @@ fn process_landing(
         ticket_dir.display(),
         ticket_start.elapsed()
     );
-    success
+    outcome
 }
 
 // --------------------------------------------------
@@ -381,8 +522,15 @@ fn ensure_upload_instance(
     orcid: &str,
     filenames: &str,
 ) -> Result<i64> {
-    let (_, existing) =
-        ops::list_upload_instances(conn, None, None, Some(ticket_id), true, None, None)?;
+    let (_, existing) = ops::list_upload_instances(
+        conn,
+        None,
+        None,
+        Some(ticket_id),
+        true,
+        None,
+        None,
+    )?;
 
     if let Some(instance) = existing
         .into_iter()
@@ -491,4 +639,129 @@ fn collect_filenames(dir: &Path) -> Vec<String> {
     };
     names.sort();
     names
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use libmdrepo::common::get_md5;
+    use tempfile::tempdir;
+
+    /// A landing dir holding one uploaded file, plus a manifest describing it.
+    fn write_upload(dir: &Path) {
+        fs::write(dir.join("sim.xtc"), b"trajectory").unwrap();
+        let md5 = get_md5(&dir.join("sim.xtc")).unwrap();
+        let json = format!(
+            r#"{{"total_filenum":1,"total_filesize":10,"status":"completed","files":[{{"irods_path":"sim.xtc","size":10,"md5_hash":"{md5}"}}]}}"#
+        );
+        fs::write(dir.join(COMPLETED_JSON), json).unwrap();
+    }
+
+    #[test]
+    fn accepts_intact_upload() {
+        let dir = tempdir().unwrap();
+        write_upload(dir.path());
+        assert!(check_manifest(dir.path()).unwrap().is_empty());
+    }
+
+    #[test]
+    fn missing_completed_json_errs() {
+        let dir = tempdir().unwrap();
+        let err = check_manifest(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("Missing"));
+    }
+
+    #[test]
+    fn wrong_filenum_errs() {
+        let dir = tempdir().unwrap();
+        write_upload(dir.path());
+        let json = r#"{"total_filenum":5,"total_filesize":0,"status":"completed","files":[{"irods_path":"sim.xtc","size":9,"md5_hash":"abc"}]}"#;
+        fs::write(dir.path().join(COMPLETED_JSON), json).unwrap();
+        assert!(check_manifest(dir.path()).is_err());
+    }
+
+    #[test]
+    fn missing_file_returns_error() {
+        let dir = tempdir().unwrap();
+        write_upload(dir.path());
+        let json = r#"{"total_filenum":1,"total_filesize":0,"status":"completed","files":[{"irods_path":"ghost.xtc","size":0,"md5_hash":"abc123abc123abc123abc123abc12300"}]}"#;
+        fs::write(dir.path().join(COMPLETED_JSON), json).unwrap();
+        let errors = check_manifest(dir.path()).unwrap();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("Missing") && e.contains("ghost.xtc"))
+        );
+    }
+
+    #[test]
+    fn md5_mismatch_returns_error() {
+        let dir = tempdir().unwrap();
+        write_upload(dir.path());
+        let json = r#"{"total_filenum":1,"total_filesize":10,"status":"completed","files":[{"irods_path":"sim.xtc","size":10,"md5_hash":"00000000000000000000000000000000"}]}"#;
+        fs::write(dir.path().join(COMPLETED_JSON), json).unwrap();
+        let errors = check_manifest(dir.path()).unwrap();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("MD5") && e.contains("sim.xtc"))
+        );
+    }
+
+    #[test]
+    fn size_mismatch_returns_error() {
+        let dir = tempdir().unwrap();
+        write_upload(dir.path());
+        let md5 = get_md5(&dir.path().join("sim.xtc")).unwrap();
+        let json = format!(
+            r#"{{"total_filenum":1,"total_filesize":9999,"status":"completed","files":[{{"irods_path":"sim.xtc","size":9999,"md5_hash":"{md5}"}}]}}"#
+        );
+        fs::write(dir.path().join(COMPLETED_JSON), json).unwrap();
+        let errors = check_manifest(dir.path()).unwrap();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("size") && e.contains("sim.xtc"))
+        );
+    }
+
+    #[test]
+    fn duplicate_md5_returns_error() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("copy_a.dat"), b"identical").unwrap();
+        fs::write(dir.path().join("copy_b.dat"), b"identical").unwrap();
+        let md5 = get_md5(&dir.path().join("copy_a.dat")).unwrap();
+        let json = format!(
+            r#"{{"total_filenum":2,"total_filesize":18,"status":"completed","files":[
+                {{"irods_path":"copy_a.dat","size":9,"md5_hash":"{md5}"}},
+                {{"irods_path":"copy_b.dat","size":9,"md5_hash":"{md5}"}}
+            ]}}"#
+        );
+        fs::write(dir.path().join(COMPLETED_JSON), json).unwrap();
+        let errors = check_manifest(dir.path()).unwrap();
+        assert!(errors.iter().any(|e| e.contains("duplicated")));
+    }
+
+    #[test]
+    fn inconsistent_total_filesize_returns_error() {
+        let dir = tempdir().unwrap();
+        write_upload(dir.path());
+        let md5 = get_md5(&dir.path().join("sim.xtc")).unwrap();
+        let json = format!(
+            r#"{{"total_filenum":1,"total_filesize":999,"status":"completed","files":[{{"irods_path":"sim.xtc","size":10,"md5_hash":"{md5}"}}]}}"#
+        );
+        fs::write(dir.path().join(COMPLETED_JSON), json).unwrap();
+        let errors = check_manifest(dir.path()).unwrap();
+        assert!(errors.iter().any(|e| e.contains("total_filesize")));
+    }
+
+    /// A manifest check must never depend on the metadata TOML, so that a bad
+    /// TOML and a bad download stay distinguishable.
+    #[test]
+    fn ignores_unparsable_metadata_toml() {
+        let dir = tempdir().unwrap();
+        write_upload(dir.path());
+        fs::write(dir.path().join("mdrepo-metadata.toml"), "not {{ valid").unwrap();
+        assert!(check_manifest(dir.path()).unwrap().is_empty());
+    }
 }

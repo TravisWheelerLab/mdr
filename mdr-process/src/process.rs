@@ -1,14 +1,16 @@
 use crate::{
+    import::{self, ImportOpts},
+    ticket::dsn_for,
     types::{
-        BlastResult, CheckedLigand, DoiPaper, Duration, Export, ExportSimulation,
-        ImportJsonArgs, ImportResult, InferredLigand, MdFile, PdbEntry, PdbResponse,
-        ProcessArgs, ProcessResult, ProcessTrajectoryArgs, ProcessedTarball,
-        ProcessedTrajectory, ProcessedTrajectoryType, PushResult, RmsdRmsf,
-        RunImportArgs, UniprotDb, UniprotEntry, UniprotResponse,
+        BlastResult, CheckedLigand, DoiAuthor, DoiPaper, Duration, Export,
+        ExportSimulation, ImportJsonArgs, ImportResult, InferredLigand, MdFile,
+        PdbEntry, PdbResponse, ProcessArgs, ProcessResult, ProcessTrajectoryArgs,
+        ProcessedTarball, ProcessedTrajectory, ProcessedTrajectoryType, PushOutcome,
+        RmsdRmsf, RunImportArgs, Server, UniprotDb, UniprotEntry, UniprotResponse,
     },
     validate,
 };
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use dotenvy::dotenv;
 use libmdrepo::{
     common::{file_exists, get_md5, read_file},
@@ -34,7 +36,6 @@ use which::which;
 
 // ── BLAST parameters ──────────────────────────────────────────────────────────
 const BLAST_EVALUE: &str = "1e-5";
-const BLAST_NUM_THREADS: &str = "2"; // 16 -> or make variable
 const BLAST_MAX_TARGET_SEQS_SWISSPROT: &str = "20";
 const BLAST_MAX_TARGET_SEQS_TREMBL: &str = "100";
 const BLAST_MIN_PIDENT: f64 = 100.0;
@@ -60,13 +61,15 @@ pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
     let meta_path = input_dir.join("mdrepo-metadata.toml");
 
     if !meta_path.is_file() {
-        bail!(format!("Missing TOML metadata"));
+        bail!(r#"Missing TOML metadata "{}""#, meta_path.display());
     }
 
-    // Canonicalize ligand SMILES before validation so non-standard notation
-    // (e.g. [N+H3]) is normalised to the form the validator accepts ([NH3+])
-    // This will change the TOML in-place.
-    canonicalize_smiles(&meta_path, &script_dir, &uv)?;
+    // Read the metadata and canonicalize its ligand SMILES in memory: OpenBabel
+    // normalises non-standard notation (e.g. [N+H3]) to the form the validator
+    // accepts ([NH3+]) without the submitter's TOML ever being rewritten. This
+    // `meta` is reused for validation and everything downstream, so the
+    // validator and the database see identical canonical forms from one read.
+    let meta = validate::load_canonical_meta(&meta_path, &script_dir, &uv)?;
 
     // Validate
     let meta_check_opts = args.no_id.then_some(MetaCheckOptions {
@@ -74,7 +77,7 @@ pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
     });
 
     // Check input files
-    match validate::validate(&input_dir, meta_check_opts) {
+    match validate::validate_meta(&input_dir, &meta, meta_check_opts) {
         Err(e) => bail!("{e}"),
         Ok(errors) => {
             if !errors.is_empty() {
@@ -97,8 +100,6 @@ pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
         debug!("Removing processed directory");
         fs::remove_dir_all(&processed_dir)?;
     }
-
-    let meta = Meta::from_file(&meta_path)?;
 
     let mut trajectory_file_names = meta.trajectory_file_names.clone();
     trajectory_file_names.sort();
@@ -147,7 +148,7 @@ pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
         make_trajectory_tarballs(&processed_dir, &processed_trajectories)?;
 
     let import_json = &processed_dir.join("import.json");
-    let warnings = make_import_json(ImportJsonArgs {
+    let (simulation, warnings) = make_import_json(ImportJsonArgs {
         meta,
         import_json,
         processed_dir: &processed_dir,
@@ -162,26 +163,27 @@ pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
         reprocess_simulation_id: args.reprocess_simulation_id,
         replicates: &replicates,
         replace_original_files: args.replace_original_files,
+        blast_num_threads: args.blast_num_threads,
     })?;
 
     let mut simulation_id: Option<u32> = None;
     if !args.dry_run {
-        let import_result = run_import(RunImportArgs {
-            uv: &uv,
-            script_dir: &script_dir,
-            import_json,
-            input_dir: &input_dir,
-            server: &args.server.to_string(),
+        let imported_id = run_import(RunImportArgs {
+            simulation: &simulation,
+            server: &args.server,
             reprocess_simulation_id: args.reprocess_simulation_id,
-            processed_dir: &processed_dir,
             replace_original_files: args.replace_original_files,
+            ticket_id: args.ticket_id,
         })?;
-        debug!("{import_result:?}");
-
-        let imported_id = import_result.simulation_id;
         simulation_id = Some(imported_id);
 
-        let push_res = run_push(
+        let import_result = ImportResult {
+            filename: import_json.to_string_lossy().to_string(),
+            simulation_id: imported_id,
+        };
+        debug!("{import_result:?}");
+
+        let push_outcome = run_push(
             &uv,
             &script_dir,
             import_result,
@@ -190,22 +192,42 @@ pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
             args.reprocess_simulation_id,
             &processed_dir,
         )?;
-        debug!("{push_res:?}");
+        debug!("{push_outcome:?}");
 
-        // With a good simulation ID and a known iRODS release directory, issue
-        // an iRODS ticket for the simulation's directory.
-        if imported_id > 0 {
-            let irods_dir = format!(
-                "/iplant/home/shared/mdrepo/{}/release/MDR{imported_id:08}",
-                args.server
+        // The push script no longer touches the DB. Flip is_placeholder here
+        // from the verified outcome: complete clears it, incomplete leaves it
+        // set. This runs on both paths so the row always reflects what is
+        // actually on the remotes, and it is idempotent across reprocesses
+        // (import re-sets is_placeholder=true at the start of every run).
+        set_placeholder(&args.server, imported_id, !push_outcome.complete)?;
+
+        if !push_outcome.complete {
+            let unverified: Vec<String> = push_outcome
+                .files
+                .iter()
+                .filter(|f| !f.verified)
+                .map(|f| {
+                    let why = if f.present { "md5 mismatch" } else { "missing" };
+                    format!("{} [{}] {why}", f.dest, f.location)
+                })
+                .collect();
+
+            let mut msg = format!(
+                "Push incomplete for simulation {imported_id}: \
+                 {} of {} file(s) unverified",
+                unverified.len(),
+                push_outcome.files.len(),
             );
-            create_irods_ticket(
-                &uv,
-                &script_dir,
-                imported_id,
-                &irods_dir,
-                &args.server.to_string(),
-            )?;
+            if !unverified.is_empty() {
+                msg.push_str(&format!("\n{}", unverified.join("\n")));
+            }
+            if !push_outcome.errors.is_empty() {
+                msg.push_str(&format!(
+                    "\nUpload errors:\n{}",
+                    push_outcome.errors.join("\n")
+                ));
+            }
+            bail!(msg);
         }
     }
 
@@ -218,47 +240,25 @@ pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
 }
 
 // --------------------------------------------------
-fn run_import(args: RunImportArgs) -> Result<ImportResult> {
-    let import_script = args.script_dir.join("import_preprocessed.py");
-    let out_file = args.processed_dir.join("imported.json");
-    debug!(r#"Import "{}""#, args.import_json.display());
+/// Import the simulation into the database, returning its ID. Unlike the ticket
+/// feedback path, a DB failure here is fatal — the import *is* the work.
+fn run_import(args: RunImportArgs) -> Result<u32> {
+    let env_key = dsn_for(args.server);
+    let url = env::var(env_key).map_err(|e| anyhow!("{env_key}: {e}"))?;
+    let mut conn =
+        mdr_db::connect(&url).map_err(|e| anyhow!("Failed to connect: {e}"))?;
 
-    let mut cmd_args = vec![
-        "run".to_string(),
-        import_script.to_string_lossy().to_string(),
-        "--file".to_string(),
-        args.import_json.to_string_lossy().to_string(),
-        "--data-dir".to_string(),
-        args.input_dir.to_string_lossy().to_string(),
-        "--server".to_string(),
-        args.server.to_string(),
-        "--out-file".to_string(),
-        out_file.to_string_lossy().to_string(),
-    ];
+    let sim_id = import::import_simulation(
+        &mut conn,
+        args.simulation,
+        &ImportOpts {
+            reprocess_simulation_id: args.reprocess_simulation_id,
+            replace_original_files: args.replace_original_files,
+            ticket_id: args.ticket_id,
+        },
+    )?;
 
-    if let Some(id) = args.reprocess_simulation_id {
-        cmd_args.extend(["--simulation-id".to_string(), id.to_string()]);
-    }
-
-    if args.replace_original_files {
-        cmd_args.extend(["--replace-original-files".to_string()]);
-    }
-
-    let mut cmd = Command::new(args.uv);
-    cmd.current_dir(args.script_dir).args(&cmd_args);
-    debug!("Running {cmd:?}");
-
-    let output = cmd.output()?;
-    if !output.status.success() {
-        bail!("{}", String::from_utf8_lossy(&output.stderr));
-    }
-
-    if !file_exists(&out_file) {
-        bail!(r#"Failed to create "{}""#, out_file.display());
-    }
-
-    serde_json::from_str(&read_file(&out_file)?)
-        .map_err(|e| anyhow!(r#"Failed to parse "{}": {e}"#, out_file.display()))
+    u32::try_from(sim_id).map_err(|e| anyhow!("Simulation ID {sim_id}: {e}"))
 }
 
 // --------------------------------------------------
@@ -270,7 +270,7 @@ fn run_push(
     server: &str,
     reprocess_simulation_id: Option<u64>,
     processed_dir: &Path,
-) -> Result<Vec<PushResult>> {
+) -> Result<PushOutcome> {
     let push_script = script_dir.join("push_sim_files.py");
     let out_file = processed_dir.join("pushed.json");
     debug!(
@@ -303,7 +303,10 @@ fn run_push(
 
     let output = cmd.output()?;
     if !output.status.success() {
-        bail!("{}", String::from_utf8_lossy(&output.stderr));
+        bail!(
+            "Command failed: {cmd:?}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     if !file_exists(&out_file) {
@@ -316,35 +319,23 @@ fn run_push(
 }
 
 // --------------------------------------------------
-fn create_irods_ticket(
-    uv: &Path,
-    script_dir: &Path,
-    simulation_id: u32,
-    irods_dir: &str,
-    server: &str,
-) -> Result<()> {
-    let ticket_script = script_dir.join("create_irods_ticket.py");
-    debug!(r#"Create iRODS ticket for "{irods_dir}""#);
+/// Set `is_placeholder` for a simulation from the verified push outcome. Opens
+/// its own connection (mirroring `run_import`) and touches only this one column.
+fn set_placeholder(server: &Server, sim_id: u32, is_placeholder: bool) -> Result<()> {
+    let env_key = dsn_for(server);
+    let url = env::var(env_key).map_err(|e| anyhow!("{env_key}: {e}"))?;
+    let mut conn =
+        mdr_db::connect(&url).map_err(|e| anyhow!("Failed to connect: {e}"))?;
 
-    let args = vec![
-        "run".to_string(),
-        ticket_script.to_string_lossy().to_string(),
-        "--simulation-id".to_string(),
-        simulation_id.to_string(),
-        "--path".to_string(),
-        irods_dir.to_string(),
-        "--server".to_string(),
-        server.to_string(),
-    ];
-
-    let mut cmd = Command::new(uv);
-    cmd.current_dir(script_dir).args(&args);
-    debug!("Running {cmd:?}");
-
-    let output = cmd.output()?;
-    if !output.status.success() {
-        bail!("{}", String::from_utf8_lossy(&output.stderr));
-    }
+    mdr_db::ops::update_simulation(
+        &mut conn,
+        i64::from(sim_id),
+        mdr_db::models::SimulationUpdate {
+            is_placeholder: Some(is_placeholder),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| anyhow!("Failed to set is_placeholder for {sim_id}: {e}"))?;
 
     Ok(())
 }
@@ -379,7 +370,10 @@ pub fn make_thumbnail(
         debug!("{}", str::from_utf8(&output.stdout)?);
 
         if !output.status.success() {
-            bail!("{}", String::from_utf8_lossy(&output.stderr));
+            bail!(
+                "Command failed: {cmd:?}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         if !file_exists(thumbnail) {
@@ -489,7 +483,10 @@ pub fn process_trajectory(args: ProcessTrajectoryArgs) -> Result<ProcessedTrajec
 
             let output = cmd.output()?;
             if !output.status.success() {
-                bail!("{}", String::from_utf8_lossy(&output.stderr));
+                bail!(
+                    "Command failed: {cmd:?}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
 
             if !file_exists(&xtc_path) {
@@ -554,7 +551,10 @@ pub fn process_trajectory(args: ProcessTrajectoryArgs) -> Result<ProcessedTrajec
 
         let output = cmd.output()?;
         if !output.status.success() {
-            bail!("{}", String::from_utf8_lossy(&output.stderr));
+            bail!(
+                "Command failed: {cmd:?}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         let missing: Vec<_> = full_min_files
@@ -564,22 +564,15 @@ pub fn process_trajectory(args: ProcessTrajectoryArgs) -> Result<ProcessedTrajec
             .collect();
 
         if !missing.is_empty() {
-            let error_file = &trajectory_dir.join("errors.txt");
-            let error_fh = File::create(error_file)?;
-            write!(
-                &error_fh,
-                "Failed command {cmd:?}\nFailed to create {}\n{}\n{}",
+            // A missing full/minimal output is fatal: the steps below require
+            // these files, and a partial result must never be recorded as a
+            // success. The command exited 0 but produced nothing, so the reason
+            // (if any) is usually on stdout -- include both streams inline.
+            bail!(
+                "Command succeeded but failed to create {}: {cmd:?}\n{}\n{}",
                 missing.join(", "),
                 String::from_utf8_lossy(&output.stdout),
                 String::from_utf8_lossy(&output.stderr),
-            )?;
-            // A missing full/minimal output is fatal: the steps below require
-            // these files, and a partial result must never be recorded as a
-            // success. The errors.txt above captures the failed command output.
-            bail!(
-                "Failed to create {} (see {})",
-                missing.join(", "),
-                error_file.display()
             );
         }
     }
@@ -743,7 +736,10 @@ pub fn get_rmsd_rmsf(
         debug!("{}", str::from_utf8(&output.stdout)?);
 
         if !output.status.success() {
-            bail!("{}", String::from_utf8_lossy(&output.stderr));
+            bail!(
+                "Command failed: {cmd:?}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         if !file_exists(&out_file) {
@@ -762,6 +758,7 @@ pub fn blast_uniprot(
     fasta_sequence: &Path,
     blast_dir: &Path,
     uniprot_db: UniprotDb,
+    num_threads: usize,
 ) -> Result<Vec<String>> {
     if !blast_dir.is_dir() {
         bail!(r#"Invalid BLAST dir "{}""#, blast_dir.display());
@@ -804,6 +801,8 @@ pub fn blast_uniprot(
             ),
         };
 
+        // blastp takes -num_threads as a string arg; render it once here.
+        let num_threads = num_threads.to_string();
         cmd.args([
             "-query",
             fasta_sequence.to_string_lossy().as_ref(),
@@ -816,7 +815,7 @@ pub fn blast_uniprot(
             "-evalue",
             BLAST_EVALUE,
             "-num_threads",
-            BLAST_NUM_THREADS,
+            num_threads.as_str(),
             "-max_target_seqs",
             max_target_seqs,
             "-task",
@@ -831,7 +830,10 @@ pub fn blast_uniprot(
         debug!("{}", str::from_utf8(&output.stdout)?);
 
         if !output.status.success() {
-            bail!("{}", String::from_utf8_lossy(&output.stderr));
+            bail!(
+                "Command failed: {cmd:?}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
     }
 
@@ -905,7 +907,10 @@ pub fn get_sequence(
         debug!("{}", str::from_utf8(&output.stdout)?);
 
         if !output.status.success() {
-            bail!("{}", String::from_utf8_lossy(&output.stderr));
+            bail!(
+                "Command failed: {cmd:?}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         if !file_exists(&sequence_file) {
@@ -946,7 +951,10 @@ pub fn sample_trajectory(
         debug!("{}", str::from_utf8(&output.stdout)?);
 
         if !output.status.success() {
-            bail!("{}", String::from_utf8_lossy(&output.stderr));
+            bail!(
+                "Command failed: {cmd:?}\n{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
         }
 
         if !file_exists(out_file) {
@@ -1002,7 +1010,10 @@ pub fn make_trajectory_tarballs(
 
             let output = cmd.output()?;
             if !output.status.success() {
-                bail!("{}", String::from_utf8_lossy(&output.stderr));
+                bail!(
+                    "Command failed: {cmd:?}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
             fs::remove_dir_all(&tar_dir)?;
 
@@ -1017,7 +1028,11 @@ pub fn make_trajectory_tarballs(
 }
 
 // --------------------------------------------------
-pub fn make_import_json(args: ImportJsonArgs) -> Result<Vec<String>> {
+/// Build the simulation payload, write it to `import.json`, and return it along
+/// with the warnings collected on the way.
+pub fn make_import_json(
+    args: ImportJsonArgs,
+) -> Result<(ExportSimulation, Vec<String>)> {
     let structure_hash =
         get_file_hash(&args.input_dir.join(&args.meta.structure_file_name))?;
 
@@ -1056,6 +1071,7 @@ pub fn make_import_json(args: ImportJsonArgs) -> Result<Vec<String>> {
         args.meta.uniprot_ids.clone(),
         &fasta_sequence_file,
         args.blast_dir,
+        args.blast_num_threads,
     )?;
 
     let (ligands, ligand_warnings) = resolve_ligands(
@@ -1159,16 +1175,13 @@ pub fn make_import_json(args: ImportJsonArgs) -> Result<Vec<String>> {
         }
     }
 
-    let export = Export {
-        simulation,
-        warnings: warnings.clone(),
-    };
+    let export = Export { simulation };
 
     debug!(r#"Writing JSON to "{}""#, args.import_json.display());
     let file = File::create(args.import_json)?;
     writeln!(&file, "{}", &serde_json::to_string_pretty(&export)?)?;
 
-    Ok(warnings)
+    Ok((export.simulation, warnings))
 }
 
 // --------------------------------------------------
@@ -1286,7 +1299,10 @@ fn collect_original_files(
             debug!("Running {cmd:?}");
             let output = cmd.output()?;
             if !output.status.success() {
-                bail!("{}", String::from_utf8_lossy(&output.stderr));
+                bail!(
+                    "Command failed: {cmd:?}\n{}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
             }
         }
         files.push(MdFile {
@@ -1386,6 +1402,7 @@ pub fn get_uniprot_entries(
     given_uniprot_ids: Option<Vec<String>>,
     fasta_sequence_file: &Path,
     blast_dir: &Path,
+    blast_num_threads: usize,
 ) -> Result<(Vec<UniprotEntry>, Vec<String>)> {
     let mut uniprot_ids: Vec<String> = given_uniprot_ids
         .unwrap_or_default()
@@ -1396,13 +1413,21 @@ pub fn get_uniprot_entries(
 
     if uniprot_ids.is_empty() {
         // There are no given Uniprot IDs, so search
-        let swissprot_ids =
-            blast_uniprot(fasta_sequence_file, blast_dir, UniprotDb::Swissprot)?;
+        let swissprot_ids = blast_uniprot(
+            fasta_sequence_file,
+            blast_dir,
+            UniprotDb::Swissprot,
+            blast_num_threads,
+        )?;
 
         if swissprot_ids.is_empty() {
             // Second-tier hits from Trembl
-            let trembl_ids =
-                blast_uniprot(fasta_sequence_file, blast_dir, UniprotDb::Trembl)?;
+            let trembl_ids = blast_uniprot(
+                fasta_sequence_file,
+                blast_dir,
+                UniprotDb::Trembl,
+                blast_num_threads,
+            )?;
 
             if let Some(first) = trembl_ids.first() {
                 uniprot_ids.push(first.clone());
@@ -1419,8 +1444,12 @@ pub fn get_uniprot_entries(
         uniprot_ids.dedup();
 
         // Check if the given IDs are found in Swissprot/Trembl
-        let swissprot_ids =
-            blast_uniprot(fasta_sequence_file, blast_dir, UniprotDb::Swissprot)?;
+        let swissprot_ids = blast_uniprot(
+            fasta_sequence_file,
+            blast_dir,
+            UniprotDb::Swissprot,
+            blast_num_threads,
+        )?;
 
         let not_in_swissprot: Vec<_> = uniprot_ids
             .iter()
@@ -1428,8 +1457,12 @@ pub fn get_uniprot_entries(
             .collect();
 
         if !not_in_swissprot.is_empty() {
-            let isoform_ids =
-                blast_uniprot(fasta_sequence_file, blast_dir, UniprotDb::Isoform)?;
+            let isoform_ids = blast_uniprot(
+                fasta_sequence_file,
+                blast_dir,
+                UniprotDb::Isoform,
+                blast_num_threads,
+            )?;
 
             let mut found_in_isoform: Vec<(String, String)> = vec![];
             for uniprot_id in &not_in_swissprot {
@@ -1449,8 +1482,12 @@ pub fn get_uniprot_entries(
 
             // If we still haven't found all the Uniprot IDs, look in Trembl
             if swissprot_ids.len() + found_in_isoform.len() < uniprot_ids.len() {
-                let trembl_ids =
-                    blast_uniprot(fasta_sequence_file, blast_dir, UniprotDb::Trembl)?;
+                let trembl_ids = blast_uniprot(
+                    fasta_sequence_file,
+                    blast_dir,
+                    UniprotDb::Trembl,
+                    blast_num_threads,
+                )?;
 
                 let not_in_trembl: Vec<_> = not_in_swissprot
                     .iter()
@@ -1480,29 +1517,6 @@ pub fn get_uniprot_entries(
 }
 
 // --------------------------------------------------
-fn canonicalize_smiles(meta_path: &Path, script_dir: &Path, uv: &Path) -> Result<()> {
-    let script = script_dir.join("canonicalize_smiles.py");
-    let mut cmd = Command::new(uv);
-    cmd.current_dir(script_dir).args([
-        "run",
-        script.to_string_lossy().as_ref(),
-        meta_path.to_string_lossy().as_ref(),
-    ]);
-    debug!("Running {cmd:?}");
-
-    let output = cmd.output()?;
-    if !output.status.success() {
-        bail!(
-            "{} failed: {}",
-            script.display(),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-
-    Ok(())
-}
-
-// --------------------------------------------------
 pub fn check_ligand(
     ligand: &metadata::Ligand,
     inferred_ligand: &InferredLigand,
@@ -1521,7 +1535,10 @@ pub fn check_ligand(
 
     let output = cmd.output()?;
     if !output.status.success() {
-        bail!("{}", String::from_utf8_lossy(&output.stderr));
+        bail!(
+            "Command failed: {cmd:?}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     let stdout = str::from_utf8(&output.stdout)?;
@@ -1644,7 +1661,10 @@ fn measure_trajectory(
     let output = cmd.output()?;
 
     if !output.status.success() {
-        bail!("{}", String::from_utf8_lossy(&output.stderr));
+        bail!(
+            "Command failed: {cmd:?}\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
     }
 
     let stdout = str::from_utf8(&output.stdout)?.to_string();
@@ -1691,11 +1711,17 @@ fn measure_trajectory(
     let (time_start, time_stop, num_frames) = match (time_start, time_stop, num_frames)
     {
         (Some(a), Some(b), Some(c)) => (a as f64, b as f64, c as f64),
-        _ => bail!("Failed to parse molly output:\n{stdout}"),
+        _ => bail!(
+            "Failed to parse molly output for \"{}\":\n{stdout}",
+            full_xtc.display()
+        ),
     };
 
     if num_frames <= 1. {
-        bail!("Trajectory file has only {num_frames} frame(s)");
+        bail!(
+            "Trajectory file \"{}\" has only {num_frames} frame(s)",
+            full_xtc.display()
+        );
     }
 
     // time_start/time_stop are in ps from molly
@@ -1757,51 +1783,71 @@ pub fn get_doi(doi: &str) -> Result<metadata::Paper> {
         .json()
         .map_err(|e| anyhow!("Failed to parse DOI response ({url}): {e}"))?;
 
+    Ok(mk_paper(doi_paper, doi))
+}
+
+// --------------------------------------------------
+/// Map a Crossref/DOI record onto a `Paper`. This is the authority on how a DOI
+/// becomes a publication; `utils/python/fix_pub_metadata.py`, which backfills
+/// the rows the retired Python importer wrote, mirrors it.
+fn mk_paper(doi_paper: DoiPaper, doi: &str) -> metadata::Paper {
     let authors = doi_paper
         .author
-        .into_iter()
-        .map(|author| format!("{} {}", author.given, author.family))
+        .iter()
+        .filter_map(DoiAuthor::display_name)
         .collect::<Vec<String>>()
         .join(", ");
 
-    let year = if let Some(published) = doi_paper.published {
-        published.date_parts.first().copied().unwrap_or(0)
-    } else if let Some(issued) = doi_paper.issued {
-        issued
-            .date_parts
+    // Crossref spreads the publication date across four fields and populates
+    // whichever ones it has; take the year from the first that carries a date.
+    let year = [
+        doi_paper.published,
+        doi_paper.issued,
+        doi_paper.published_print,
+        doi_paper.published_online,
+    ]
+    .into_iter()
+    .flatten()
+    .find_map(|date| {
+        date.date_parts
             .first()
             .and_then(|parts| parts.first().copied())
-            .unwrap_or(0)
-    } else {
-        0
-    };
-    let volume = doi_paper.volume.unwrap_or(0);
+    })
+    .unwrap_or(0);
+    // Crossref reports volume as a string (e.g. "11", but also "11A"); keep the
+    // numeric Paper.volume, falling back to 0 when it is absent or non-numeric.
+    let volume = doi_paper.volume.and_then(|v| v.parse().ok()).unwrap_or(0);
 
-    let paper = if let Some(publisher) = doi_paper.publisher {
-        metadata::Paper {
-            title: doi_paper.title,
-            authors,
-            journal: publisher,
-            volume,
-            number: None,
-            year,
-            pages: doi_paper.page,
-            doi: Some(doi.to_string()),
-        }
-    } else {
-        metadata::Paper {
-            title: doi_paper.title,
-            authors,
-            journal: doi_paper.journal.unwrap_or("NA".to_string()),
-            volume,
-            number: None,
-            year,
-            pages: doi_paper.page,
-            doi: Some(doi.to_string()),
-        }
-    };
+    // The journal name is Crossref's `container-title` (e.g. "Scientific Data");
+    // fall back to any `journal`, then the `publisher`, then "NA". Using the
+    // publisher directly here previously mislabelled the journal as, e.g.,
+    // "Springer Science and Business Media LLC".
+    let journal = doi_paper
+        .container_title
+        .or(doi_paper.journal)
+        .or(doi_paper.publisher)
+        .unwrap_or_else(|| "NA".to_string());
 
-    Ok(paper)
+    // The issue number is usually reported at the top level, but some records
+    // carry it only inside `journal-issue`.
+    let number = doi_paper
+        .issue
+        .or_else(|| doi_paper.journal_issue.and_then(|issue| issue.issue));
+
+    // Journals that number articles rather than paginating them report an
+    // `article-number` in place of a `page`.
+    let pages = doi_paper.page.or(doi_paper.article_number);
+
+    metadata::Paper {
+        title: doi_paper.title,
+        authors,
+        journal,
+        volume,
+        number,
+        year,
+        pages,
+        doi: Some(doi.to_string()),
+    }
 }
 
 // --------------------------------------------------
@@ -1884,7 +1930,7 @@ mod tests {
     use super::*;
     use libmdrepo::metadata::Meta;
     use std::io::Write;
-    use tempfile::{tempdir, NamedTempFile};
+    use tempfile::{NamedTempFile, tempdir};
 
     const MINIMAL_TOML: &str = r#"
         lead_contributor_orcid = "0000-0000-0000-0000"
@@ -1897,6 +1943,51 @@ mod tests {
         software_name = "GROMACS"
         software_version = "2023"
     "#;
+
+    // The record `fix_pub_metadata.py` was written for: an issue and an
+    // `article-number` where there is no `page`, both of which get_doi used to
+    // discard, leaving `md_pub.number` and `md_pub.pages` empty.
+    #[test]
+    fn test_mk_paper_crossref() -> anyhow::Result<()> {
+        let text = std::fs::read_to_string("tests/inputs/doi-crossref.json")?;
+        let doi_paper: DoiPaper = serde_json::from_str(&text)?;
+        let paper = mk_paper(doi_paper, "10.1038/s41597-024-04140-z");
+
+        assert_eq!(
+            paper.title,
+            "mdCATH: A Large-Scale MD Dataset for Data-Driven \
+             Computational Biophysics"
+        );
+        assert_eq!(paper.journal, "Scientific Data");
+        assert_eq!(paper.volume, 11);
+        assert_eq!(paper.number, Some("1".to_string()));
+        assert_eq!(paper.year, 2024);
+        assert_eq!(paper.pages, Some("1299".to_string()));
+        assert!(paper.authors.starts_with("Antonio Mirarchi, "));
+        Ok(())
+    }
+
+    // Only `published-print` carries the date here, and the sole author is a
+    // consortium. Before, the year fell back to 0 and the record did not parse.
+    #[test]
+    fn test_mk_paper_print_date_and_consortium() -> anyhow::Result<()> {
+        let text = r#"{
+            "title": "An older study",
+            "author": [{"name": "The MDRepo Consortium"}],
+            "container-title": "Journal of Simulation",
+            "journal-issue": {"issue": "4"},
+            "published-print": {"date-parts": [[1998, 3]]}
+        }"#;
+        let doi_paper: DoiPaper = serde_json::from_str(text)?;
+        let paper = mk_paper(doi_paper, "10.0000/older");
+
+        assert_eq!(paper.year, 1998);
+        assert_eq!(paper.authors, "The MDRepo Consortium");
+        assert_eq!(paper.number, Some("4".to_string()));
+        assert_eq!(paper.pages, None);
+        assert_eq!(paper.volume, 0);
+        Ok(())
+    }
 
     #[test]
     fn test_round_dp() {
@@ -1997,7 +2088,7 @@ mod tests {
             &[(1, "sp|P12345|PROT_HUMAN", 100.0)],
         );
         let ids =
-            blast_uniprot(&fasta, blast_dir.path(), UniprotDb::Swissprot).unwrap();
+            blast_uniprot(&fasta, blast_dir.path(), UniprotDb::Swissprot, 2).unwrap();
         assert_eq!(ids, vec!["P12345".to_string()]);
     }
 
@@ -2012,7 +2103,8 @@ mod tests {
             "trembl",
             &[(1, "tr|A0A000XYZ|PROT_MOUSE", 100.0)],
         );
-        let ids = blast_uniprot(&fasta, blast_dir.path(), UniprotDb::Trembl).unwrap();
+        let ids =
+            blast_uniprot(&fasta, blast_dir.path(), UniprotDb::Trembl, 2).unwrap();
         assert_eq!(ids, vec!["A0A000XYZ".to_string()]);
     }
 
@@ -2031,7 +2123,7 @@ mod tests {
             ],
         );
         let ids =
-            blast_uniprot(&fasta, blast_dir.path(), UniprotDb::Swissprot).unwrap();
+            blast_uniprot(&fasta, blast_dir.path(), UniprotDb::Swissprot, 2).unwrap();
         assert_eq!(ids, vec!["P99999".to_string()]);
     }
 
@@ -2040,11 +2132,14 @@ mod tests {
         let tmp = tempdir().unwrap();
         let fasta = tmp.path().join("sequence.fa");
         fs::write(&fasta, b">1\nACGT").unwrap();
-        assert!(blast_uniprot(
-            &fasta,
-            Path::new("/nonexistent/blast"),
-            UniprotDb::Swissprot
-        )
-        .is_err());
+        assert!(
+            blast_uniprot(
+                &fasta,
+                Path::new("/nonexistent/blast"),
+                UniprotDb::Swissprot,
+                2
+            )
+            .is_err()
+        );
     }
 }

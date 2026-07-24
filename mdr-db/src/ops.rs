@@ -953,16 +953,16 @@ pub fn delete_simulation_pub(conn: &mut PgConnection, rid: i64) -> QueryResult<u
     diesel::delete(md_simulation_pub::table.find(rid)).execute(conn)
 }
 
-// ── md_simulation_replicate_group ─────────────────────────────────────────────
+// ── md_replicate_group ────────────────────────────────────────────────────────
 
 fn replicate_group_query(
     search: Option<&str>,
-) -> md_simulation_replicate_group::BoxedQuery<'static, Pg> {
-    use crate::schema::md_simulation_replicate_group::dsl::*;
-    let mut q = md_simulation_replicate_group.into_boxed();
+) -> md_replicate_group::BoxedQuery<'static, Pg> {
+    use crate::schema::md_replicate_group::dsl::*;
+    let mut q = md_replicate_group.into_boxed();
     if let Some(t) = search {
         let p = format!("%{t}%");
-        q = q.filter(psf_hash.ilike(p));
+        q = q.filter(replicate_key.ilike(p.clone()).or(sample_mdrepo_id.ilike(p)));
     }
     q
 }
@@ -974,7 +974,7 @@ pub fn list_replicate_groups(
     lim: Option<i64>,
     offset: Option<i64>,
 ) -> QueryResult<(i64, Vec<ReplicateGroup>)> {
-    use crate::schema::md_simulation_replicate_group::dsl::id;
+    use crate::schema::md_replicate_group::dsl::id;
     let count = replicate_group_query(search.as_deref())
         .select(count_star())
         .first(conn)?;
@@ -992,7 +992,7 @@ pub fn get_replicate_group(
     conn: &mut PgConnection,
     rid: i64,
 ) -> QueryResult<ReplicateGroup> {
-    md_simulation_replicate_group::table
+    md_replicate_group::table
         .find(rid)
         .select(ReplicateGroup::as_select())
         .first(conn)
@@ -1002,7 +1002,7 @@ pub fn insert_replicate_group(
     conn: &mut PgConnection,
     new: NewReplicateGroup,
 ) -> QueryResult<ReplicateGroup> {
-    diesel::insert_into(md_simulation_replicate_group::table)
+    diesel::insert_into(md_replicate_group::table)
         .values(&new)
         .returning(ReplicateGroup::as_returning())
         .get_result(conn)
@@ -1013,14 +1013,14 @@ pub fn update_replicate_group(
     rid: i64,
     cs: ReplicateGroupUpdate,
 ) -> QueryResult<ReplicateGroup> {
-    diesel::update(md_simulation_replicate_group::table.find(rid))
+    diesel::update(md_replicate_group::table.find(rid))
         .set(&cs)
         .returning(ReplicateGroup::as_returning())
         .get_result(conn)
 }
 
 pub fn delete_replicate_group(conn: &mut PgConnection, rid: i64) -> QueryResult<usize> {
-    diesel::delete(md_simulation_replicate_group::table.find(rid)).execute(conn)
+    diesel::delete(md_replicate_group::table.find(rid)).execute(conn)
 }
 
 // ── md_simulation_uniprot ─────────────────────────────────────────────────────
@@ -1824,4 +1824,339 @@ pub fn update_social_account(
 
 pub fn delete_social_account(conn: &mut PgConnection, rid: i32) -> QueryResult<usize> {
     diesel::delete(socialaccount_socialaccount::table.find(rid)).execute(conn)
+}
+
+// ── import: natural-key finders ───────────────────────────────────────────────
+//
+// These back the DB-import port (replacing `import_preprocessed.py`). Each is a
+// pure "find" — it returns `Ok(None)` when there is no match rather than
+// inserting — so orchestration can decide find-or-create. They mirror the
+// SELECTs the script does before each `create_*`.
+
+/// User id for an ORCID, via the `orcid` social account. Mirrors the script's
+/// `get_user`: join `socialaccount_socialaccount` (provider `orcid`) to `md_user`.
+pub fn find_user_id_by_orcid(
+    conn: &mut PgConnection,
+    orcid_uid: &str,
+) -> QueryResult<Option<i64>> {
+    md_user::table
+        .inner_join(
+            socialaccount_socialaccount::table
+                .on(socialaccount_socialaccount::user_id.eq(md_user::id)),
+        )
+        .filter(socialaccount_socialaccount::provider.eq("orcid"))
+        .filter(socialaccount_socialaccount::uid.eq(orcid_uid))
+        .select(md_user::id)
+        .first::<i64>(conn)
+        .optional()
+}
+
+/// Software id by its natural key `(name, version)`. Mirrors `create_software`'s
+/// lookup. NOTE: this diverges deliberately from the Python for a NULL version —
+/// the script queries `version = %s`, which never matches when the version is
+/// None (so it always inserts a fresh row); here a None version matches an
+/// existing `version IS NULL` row, which is the correct dedup behavior.
+pub fn find_software_id_by_name_version(
+    conn: &mut PgConnection,
+    sw_name: &str,
+    sw_version: Option<&str>,
+) -> QueryResult<Option<i64>> {
+    use crate::schema::md_software::dsl::*;
+    let mut q = md_software.filter(name.eq(sw_name)).into_boxed();
+    q = match sw_version {
+        Some(v) => q.filter(version.eq(v)),
+        None => q.filter(version.is_null()),
+    };
+    q.select(id).first::<i64>(conn).optional()
+}
+
+/// Pub id by DOI — the script's preferred dedup key when a DOI is present.
+pub fn find_pub_id_by_doi(
+    conn: &mut PgConnection,
+    pub_doi: &str,
+) -> QueryResult<Option<i64>> {
+    use crate::schema::md_pub::dsl::*;
+    md_pub
+        .filter(doi.eq(pub_doi))
+        .select(id)
+        .first::<i64>(conn)
+        .optional()
+}
+
+/// Pub id by metadata — the script's dedup fallback when there is no DOI.
+pub fn find_pub_id_by_metadata(
+    conn: &mut PgConnection,
+    pub_title: &str,
+    pub_authors: &str,
+    pub_journal: &str,
+    pub_volume: i32,
+    pub_year: i32,
+) -> QueryResult<Option<i64>> {
+    use crate::schema::md_pub::dsl::*;
+    md_pub
+        .filter(title.eq(pub_title))
+        .filter(authors.eq(pub_authors))
+        .filter(journal.eq(pub_journal))
+        .filter(volume.eq(pub_volume))
+        .filter(year.eq(pub_year))
+        .select(id)
+        .first::<i64>(conn)
+        .optional()
+}
+
+/// Existing `md_simulation_pub` link id for `(simulation_id, pub_id)`, so the
+/// importer doesn't create a duplicate link (mirrors `create_paper`'s guard).
+pub fn find_simulation_pub_id(
+    conn: &mut PgConnection,
+    sim_id: i64,
+    pid: i64,
+) -> QueryResult<Option<i64>> {
+    use crate::schema::md_simulation_pub::dsl::*;
+    md_simulation_pub
+        .filter(simulation_id.eq(sim_id))
+        .filter(pub_id.eq(pid))
+        .select(id)
+        .first::<i64>(conn)
+        .optional()
+}
+
+/// Simulation id by `(alias, created_by_id)` — the first `get_simulation` upsert
+/// probe. A `None` creator matches a row whose `created_by_id IS NULL` (correct
+/// per-user alias semantics; the Python's `created_by_id = NULL` never matched).
+pub fn find_simulation_id_by_alias(
+    conn: &mut PgConnection,
+    sim_alias: &str,
+    created_by: Option<i64>,
+) -> QueryResult<Option<i64>> {
+    use crate::schema::md_simulation::dsl::*;
+    let mut q = md_simulation.filter(alias.eq(sim_alias)).into_boxed();
+    q = match created_by {
+        Some(u) => q.filter(created_by_id.eq(u)),
+        None => q.filter(created_by_id.is_null()),
+    };
+    q.select(id).first::<i64>(conn).optional()
+}
+
+/// Simulation id by its `unique_file_hash_string` — `get_simulation`'s second
+/// probe, used to recognise a re-upload of the same files.
+pub fn find_simulation_id_by_hash(
+    conn: &mut PgConnection,
+    hash: &str,
+) -> QueryResult<Option<i64>> {
+    use crate::schema::md_simulation::dsl::*;
+    md_simulation
+        .filter(unique_file_hash_string.eq(hash))
+        .select(id)
+        .first::<i64>(conn)
+        .optional()
+}
+
+/// Which column identifies a contributor within a simulation. The script tries
+/// ORCID, then email, then name — the caller picks, so that precedence stays
+/// visible at the call site.
+pub enum ContributionKey<'a> {
+    Orcid(&'a str),
+    Email(&'a str),
+    Name(&'a str),
+}
+
+/// Contribution id for a simulation, by whichever natural key the caller has.
+pub fn find_contribution_id(
+    conn: &mut PgConnection,
+    sim_id: i64,
+    key: ContributionKey<'_>,
+) -> QueryResult<Option<i64>> {
+    use crate::schema::md_contribution::dsl::*;
+    let q = md_contribution
+        .filter(simulation_id.eq(sim_id))
+        .into_boxed();
+    let q = match key {
+        ContributionKey::Orcid(v) => q.filter(orcid.eq(v)),
+        ContributionKey::Email(v) => q.filter(email.eq(v)),
+        ContributionKey::Name(v) => q.filter(name.eq(v)),
+    };
+    q.select(id).first::<i64>(conn).optional()
+}
+
+/// Processed-file id by `(simulation_id, filename)`.
+pub fn find_processed_file_id(
+    conn: &mut PgConnection,
+    sim_id: i64,
+    name: &str,
+) -> QueryResult<Option<i64>> {
+    use crate::schema::md_processed_file::dsl::*;
+    md_processed_file
+        .filter(simulation_id.eq(sim_id))
+        .filter(filename.eq(name))
+        .select(id)
+        .first::<i64>(conn)
+        .optional()
+}
+
+/// Uploaded-file id by `(simulation_id, filename)`.
+pub fn find_uploaded_file_id(
+    conn: &mut PgConnection,
+    sim_id: i64,
+    name: &str,
+) -> QueryResult<Option<i64>> {
+    use crate::schema::md_uploaded_file::dsl::*;
+    md_uploaded_file
+        .filter(simulation_id.eq(sim_id))
+        .filter(filename.eq(name))
+        .select(id)
+        .first::<i64>(conn)
+        .optional()
+}
+
+/// Replicate id by `(simulation_id, trajectory_file_name)`.
+pub fn find_replicate_id(
+    conn: &mut PgConnection,
+    sim_id: i64,
+    trajectory: &str,
+) -> QueryResult<Option<i64>> {
+    use crate::schema::md_replicate::dsl::*;
+    md_replicate
+        .filter(simulation_id.eq(sim_id))
+        .filter(trajectory_file_name.eq(trajectory))
+        .select(id)
+        .first::<i64>(conn)
+        .optional()
+}
+
+/// Ligand id by `(simulation_id, name)`.
+pub fn find_ligand_id(
+    conn: &mut PgConnection,
+    sim_id: i64,
+    ligand_name: &str,
+) -> QueryResult<Option<i64>> {
+    use crate::schema::md_ligand::dsl::*;
+    md_ligand
+        .filter(simulation_id.eq(sim_id))
+        .filter(name.eq(ligand_name))
+        .select(id)
+        .first::<i64>(conn)
+        .optional()
+}
+
+/// Solute id by `(simulation_id, name)`.
+pub fn find_solute_id(
+    conn: &mut PgConnection,
+    sim_id: i64,
+    solute_name: &str,
+) -> QueryResult<Option<i64>> {
+    use crate::schema::md_solute::dsl::*;
+    md_solute
+        .filter(simulation_id.eq(sim_id))
+        .filter(name.eq(solute_name))
+        .select(id)
+        .first::<i64>(conn)
+        .optional()
+}
+
+/// External-link id by `(simulation_id, url)`.
+pub fn find_external_link_id(
+    conn: &mut PgConnection,
+    sim_id: i64,
+    link_url: &str,
+) -> QueryResult<Option<i64>> {
+    use crate::schema::md_external_link::dsl::*;
+    md_external_link
+        .filter(simulation_id.eq(sim_id))
+        .filter(url.eq(link_url))
+        .select(id)
+        .first::<i64>(conn)
+        .optional()
+}
+
+/// Uniprot row id for a UniProt accession (`md_uniprot.uniprot_id`, the string
+/// accession — not the primary key).
+pub fn find_uniprot_id_by_accession(
+    conn: &mut PgConnection,
+    accession: &str,
+) -> QueryResult<Option<i64>> {
+    use crate::schema::md_uniprot::dsl::*;
+    md_uniprot
+        .filter(uniprot_id.eq(accession))
+        .select(id)
+        .first::<i64>(conn)
+        .optional()
+}
+
+/// Existing `md_simulation_uniprot` link id for `(simulation_id, uniprot_id)`.
+pub fn find_simulation_uniprot_id(
+    conn: &mut PgConnection,
+    sim_id: i64,
+    uniprot_pk: i64,
+) -> QueryResult<Option<i64>> {
+    use crate::schema::md_simulation_uniprot::dsl::*;
+    md_simulation_uniprot
+        .filter(simulation_id.eq(sim_id))
+        .filter(uniprot_id.eq(uniprot_pk))
+        .select(id)
+        .first::<i64>(conn)
+        .optional()
+}
+
+/// PDB row id for a PDB code (`md_pdb.pdb_id`, the string code — not the primary
+/// key). The script lowercases the code before looking it up.
+pub fn find_pdb_id_by_code(
+    conn: &mut PgConnection,
+    code: &str,
+) -> QueryResult<Option<i64>> {
+    use crate::schema::md_pdb::dsl::*;
+    md_pdb
+        .filter(pdb_id.eq(code))
+        .select(id)
+        .first::<i64>(conn)
+        .optional()
+}
+
+// ── import: reprocess delete-cascade ──────────────────────────────────────────
+//
+// The DB has no ON DELETE CASCADE from the frontend-download link tables to the
+// file tables, so — like the script — we delete the link rows first, then the
+// files. Returns the number of *file* rows deleted.
+
+/// Delete a simulation's processed files and their frontend-download links.
+/// Used on the `--simulation-id` reprocess path.
+pub fn delete_processed_files_for_simulation(
+    conn: &mut PgConnection,
+    sim_id: i64,
+) -> QueryResult<usize> {
+    use crate::schema::md_frontend_download_instance_processed_files::dsl as link;
+    use crate::schema::md_processed_file::dsl as pf;
+
+    let file_ids = pf::md_processed_file
+        .filter(pf::simulation_id.eq(sim_id))
+        .select(pf::id);
+    diesel::delete(
+        link::md_frontend_download_instance_processed_files
+            .filter(link::simulationprocessedfile_id.eq_any(file_ids)),
+    )
+    .execute(conn)?;
+
+    diesel::delete(pf::md_processed_file.filter(pf::simulation_id.eq(sim_id)))
+        .execute(conn)
+}
+
+/// Delete a simulation's uploaded (original) files and their frontend-download
+/// links. Used on the `--replace-original-files` reprocess path.
+pub fn delete_uploaded_files_for_simulation(
+    conn: &mut PgConnection,
+    sim_id: i64,
+) -> QueryResult<usize> {
+    use crate::schema::md_frontend_download_instance_uploaded_files::dsl as link;
+    use crate::schema::md_uploaded_file::dsl as uf;
+
+    let file_ids = uf::md_uploaded_file
+        .filter(uf::simulation_id.eq(sim_id))
+        .select(uf::id);
+    diesel::delete(
+        link::md_frontend_download_instance_uploaded_files
+            .filter(link::simulationuploadedfile_id.eq_any(file_ids)),
+    )
+    .execute(conn)?;
+
+    diesel::delete(uf::md_uploaded_file.filter(uf::simulation_id.eq(sim_id)))
+        .execute(conn)
 }

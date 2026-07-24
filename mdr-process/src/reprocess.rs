@@ -2,7 +2,7 @@ use crate::{
     process,
     types::{ProcessArgs, ReprocessArgs},
 };
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use dotenvy::dotenv;
 use libmdrepo::{
     common::{file_exists, get_simulation_id},
@@ -93,6 +93,8 @@ pub fn reprocess(args: &ReprocessArgs) -> Result<()> {
         no_id: true, // If it had no PDB/Uniprots before, let it stand
         dry_run: args.dry_run,
         replace_original_files: false,
+        blast_num_threads: args.blast_num_threads,
+        ticket_id: None,
     })?;
 
     if !args.dry_run && !args.preserve {
