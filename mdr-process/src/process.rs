@@ -5,8 +5,8 @@ use crate::{
         BlastResult, CheckedLigand, DoiAuthor, DoiPaper, Duration, Export,
         ExportSimulation, ImportJsonArgs, ImportResult, InferredLigand, MdFile,
         PdbEntry, PdbResponse, ProcessArgs, ProcessResult, ProcessTrajectoryArgs,
-        ProcessedTarball, ProcessedTrajectory, ProcessedTrajectoryType, PushResult,
-        RmsdRmsf, RunImportArgs, UniprotDb, UniprotEntry, UniprotResponse,
+        ProcessedTarball, ProcessedTrajectory, ProcessedTrajectoryType, PushOutcome,
+        RmsdRmsf, RunImportArgs, Server, UniprotDb, UniprotEntry, UniprotResponse,
     },
     validate,
 };
@@ -183,7 +183,7 @@ pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
         };
         debug!("{import_result:?}");
 
-        let push_res = run_push(
+        let push_outcome = run_push(
             &uv,
             &script_dir,
             import_result,
@@ -192,7 +192,43 @@ pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
             args.reprocess_simulation_id,
             &processed_dir,
         )?;
-        debug!("{push_res:?}");
+        debug!("{push_outcome:?}");
+
+        // The push script no longer touches the DB. Flip is_placeholder here
+        // from the verified outcome: complete clears it, incomplete leaves it
+        // set. This runs on both paths so the row always reflects what is
+        // actually on the remotes, and it is idempotent across reprocesses
+        // (import re-sets is_placeholder=true at the start of every run).
+        set_placeholder(&args.server, imported_id, !push_outcome.complete)?;
+
+        if !push_outcome.complete {
+            let unverified: Vec<String> = push_outcome
+                .files
+                .iter()
+                .filter(|f| !f.verified)
+                .map(|f| {
+                    let why = if f.present { "md5 mismatch" } else { "missing" };
+                    format!("{} [{}] {why}", f.dest, f.location)
+                })
+                .collect();
+
+            let mut msg = format!(
+                "Push incomplete for simulation {imported_id}: \
+                 {} of {} file(s) unverified",
+                unverified.len(),
+                push_outcome.files.len(),
+            );
+            if !unverified.is_empty() {
+                msg.push_str(&format!("\n{}", unverified.join("\n")));
+            }
+            if !push_outcome.errors.is_empty() {
+                msg.push_str(&format!(
+                    "\nUpload errors:\n{}",
+                    push_outcome.errors.join("\n")
+                ));
+            }
+            bail!(msg);
+        }
     }
 
     debug!("Finished processing in {:?}", start_time.elapsed());
@@ -234,7 +270,7 @@ fn run_push(
     server: &str,
     reprocess_simulation_id: Option<u64>,
     processed_dir: &Path,
-) -> Result<Vec<PushResult>> {
+) -> Result<PushOutcome> {
     let push_script = script_dir.join("push_sim_files.py");
     let out_file = processed_dir.join("pushed.json");
     debug!(
@@ -280,6 +316,28 @@ fn run_push(
 
     serde_json::from_str(&read_file(&out_file)?)
         .map_err(|e| anyhow!(r#"Failed to parse "{}": {e}"#, out_file.display()))
+}
+
+// --------------------------------------------------
+/// Set `is_placeholder` for a simulation from the verified push outcome. Opens
+/// its own connection (mirroring `run_import`) and touches only this one column.
+fn set_placeholder(server: &Server, sim_id: u32, is_placeholder: bool) -> Result<()> {
+    let env_key = dsn_for(server);
+    let url = env::var(env_key).map_err(|e| anyhow!("{env_key}: {e}"))?;
+    let mut conn =
+        mdr_db::connect(&url).map_err(|e| anyhow!("Failed to connect: {e}"))?;
+
+    mdr_db::ops::update_simulation(
+        &mut conn,
+        i64::from(sim_id),
+        mdr_db::models::SimulationUpdate {
+            is_placeholder: Some(is_placeholder),
+            ..Default::default()
+        },
+    )
+    .map_err(|e| anyhow!("Failed to set is_placeholder for {sim_id}: {e}"))?;
+
+    Ok(())
 }
 
 // --------------------------------------------------

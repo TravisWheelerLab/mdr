@@ -566,11 +566,30 @@ pub struct ProcessResult {
 }
 
 // --------------------------------------------------
+/// What `push_sim_files.py` writes to `pushed.json`: the per-file verification
+/// results plus `complete`, the AND of every file being present on its remote
+/// with a matching MD5. Drives the `is_placeholder` flip.
 #[derive(Debug, Deserialize, Serialize)]
-pub struct PushResult {
+pub struct PushOutcome {
+    pub simulation_id: u32,
+    pub complete: bool,
+    pub files: Vec<PushedFile>,
+    #[serde(default)]
+    pub errors: Vec<String>,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub struct PushedFile {
+    /// "media" or "irods".
+    pub location: String,
     pub src: String,
     pub dest: String,
     pub size: u64,
+    pub expected_md5: String,
+    #[serde(default)]
+    pub remote_md5: Option<String>,
+    pub present: bool,
+    pub verified: bool,
 }
 
 // --------------------------------------------------
