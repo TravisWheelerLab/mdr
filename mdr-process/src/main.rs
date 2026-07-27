@@ -94,7 +94,18 @@ fn run(args: Cli) -> Result<()> {
             match ticket::process(args) {
                 Err(e) => {
                     let message = match ticket::get_ticket_user(args) {
-                        Ok(ticket) => format!("{e}\nNotify User\n{ticket:#?}"),
+                        Ok(ticket) => {
+                            let full_name = match &ticket.last_name {
+                                Some(last) => format!("{} {last}", ticket.first_name),
+                                None => ticket.first_name.clone(),
+                            };
+                            let identifier = if !ticket.orcid.is_empty() {
+                                &ticket.orcid
+                            } else {
+                                &ticket.username
+                            };
+                            format!("{e}\n{full_name} ({identifier}) {}", ticket.email)
+                        }
                         Err(e2) => format!("{e} ({e2})"),
                     };
                     bail!(message);

@@ -802,6 +802,11 @@ pub struct TicketInfo {
     pub email: String,
     pub institution: Option<String>,
     pub orcid: String,
+    // Older ticket.json files predate this field; default to empty rather
+    // than fail to deserialize (this struct is read on the failure-reporting
+    // path, so it must tolerate tickets fetched before this field existed).
+    #[serde(default)]
+    pub username: String,
 }
 
 // --------------------------------------------------

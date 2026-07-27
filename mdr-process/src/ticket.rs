@@ -94,7 +94,18 @@ pub fn process(args: &TicketArgs) -> Result<()> {
 
         let output = cmd.output()?;
         if !output.status.success() {
-            bail!("{}", String::from_utf8_lossy(&output.stderr));
+            // fetch_uploads.py's error text isn't always on stderr (e.g. an
+            // uncaught Python exception's traceback is, but some diagnostic
+            // context is only ever printed to stdout) -- capture both so a
+            // failure's Slack notice has the full picture.
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = stderr.trim();
+            let stdout = stdout.trim();
+            if stdout.is_empty() {
+                bail!("{stderr}");
+            }
+            bail!("{stderr}\n\nstdout:\n{stdout}");
         }
 
         // The ticket directory should have been created by the fetch
