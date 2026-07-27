@@ -22,7 +22,7 @@ use std::{
     env, fs,
     path::{Path, PathBuf},
     process::Command,
-    time::Instant,
+    time::{Duration, Instant},
 };
 use which::which;
 
@@ -74,9 +74,11 @@ pub fn process(args: &TicketArgs) -> Result<()> {
         ticket_dir.display()
     );
 
+    let mut fetch_elapsed: Option<Duration> = None;
     if args.skip_download {
         debug!("Skipping download");
     } else {
+        let fetch_start = Instant::now();
         let uv = which("uv").map_err(|e| anyhow!("Failed to find uv ({e})"))?;
         let fetch = script_dir.join("fetch_uploads.py");
         let mut cmd = Command::new(&uv);
@@ -107,6 +109,7 @@ pub fn process(args: &TicketArgs) -> Result<()> {
             }
             bail!("{stderr}\n\nstdout:\n{stdout}");
         }
+        fetch_elapsed = Some(fetch_start.elapsed());
 
         // The ticket directory should have been created by the fetch
         if !ticket_dir.is_dir() {
@@ -172,7 +175,14 @@ pub fn process(args: &TicketArgs) -> Result<()> {
     let results: Vec<std::result::Result<(), String>> = ticket_dirs
         .into_par_iter()
         .map(|ticket_dir| {
-            process_landing(&ticket_dir, args, script_dir, &work_dir, writes)
+            process_landing(
+                &ticket_dir,
+                args,
+                script_dir,
+                &work_dir,
+                writes,
+                fetch_elapsed,
+            )
         })
         .collect();
 
@@ -388,6 +398,7 @@ fn process_landing(
     script_dir: &Path,
     work_dir: &Path,
     feedback: Option<&FeedbackCtx>,
+    fetch_elapsed: Option<Duration>,
 ) -> std::result::Result<(), String> {
     let ticket_start = Instant::now();
     debug!(r#"Processing ticket directory "{}""#, ticket_dir.display());
@@ -420,6 +431,18 @@ fn process_landing(
                             false,
                             false,
                         );
+                        // Shared across every landing in this ticket (the
+                        // fetch downloads the whole ticket in one shot), so
+                        // this is the same duration on each instance's log.
+                        if let Some(elapsed) = fetch_elapsed {
+                            log_message(
+                                &mut conn,
+                                upload_id,
+                                &format!("Fetched uploads in {elapsed:?}"),
+                                false,
+                                false,
+                            );
+                        }
                         db = Some((conn, upload_id));
                     }
                     Err(e) => info!(
@@ -469,6 +492,32 @@ fn process_landing(
             if let Some((conn, upload_id)) = db.as_mut() {
                 for warning in &result.warnings {
                     log_message(conn, *upload_id, warning, false, true);
+                }
+                log_message(
+                    conn,
+                    *upload_id,
+                    &format!(
+                        "Trajectory processing finished in {:?}",
+                        result.trajectory_processing_elapsed
+                    ),
+                    false,
+                    false,
+                );
+                log_message(
+                    conn,
+                    *upload_id,
+                    &format!("BLAST search finished in {:?}", result.blast_elapsed),
+                    false,
+                    false,
+                );
+                if let Some(elapsed) = result.push_elapsed {
+                    log_message(
+                        conn,
+                        *upload_id,
+                        &format!("Pushed files in {elapsed:?}"),
+                        false,
+                        false,
+                    );
                 }
                 log_message(
                     conn,

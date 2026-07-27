@@ -109,6 +109,7 @@ pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
     let simproc_prefix = find_conda_env_prefix("simproc")?;
     debug!("Using simproc env prefix: {}", simproc_prefix.display());
 
+    let trajectory_start = Instant::now();
     let mut processed_trajectories = trajectory_file_names
         .into_par_iter()
         .enumerate()
@@ -126,6 +127,7 @@ pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
             })
         })
         .collect::<Result<Vec<_>>>()?;
+    let trajectory_processing_elapsed = trajectory_start.elapsed();
 
     // Sort by size/trajectory name
     processed_trajectories.sort_by(|a, b| {
@@ -148,7 +150,7 @@ pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
         make_trajectory_tarballs(&processed_dir, &processed_trajectories)?;
 
     let import_json = &processed_dir.join("import.json");
-    let (simulation, warnings) = make_import_json(ImportJsonArgs {
+    let (simulation, warnings, blast_elapsed) = make_import_json(ImportJsonArgs {
         meta,
         import_json,
         processed_dir: &processed_dir,
@@ -167,6 +169,7 @@ pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
     })?;
 
     let mut simulation_id: Option<u32> = None;
+    let mut push_elapsed = None;
     if !args.dry_run {
         let imported_id = run_import(RunImportArgs {
             simulation: &simulation,
@@ -183,6 +186,7 @@ pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
         };
         debug!("{import_result:?}");
 
+        let push_start = Instant::now();
         let push_outcome = run_push(
             &uv,
             &script_dir,
@@ -192,6 +196,7 @@ pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
             args.reprocess_simulation_id,
             &processed_dir,
         )?;
+        push_elapsed = Some(push_start.elapsed());
         debug!("{push_outcome:?}");
 
         // The push script no longer touches the DB. Flip is_placeholder here
@@ -236,6 +241,9 @@ pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
     Ok(ProcessResult {
         simulation_id,
         warnings,
+        trajectory_processing_elapsed,
+        blast_elapsed,
+        push_elapsed,
     })
 }
 
@@ -1032,7 +1040,7 @@ pub fn make_trajectory_tarballs(
 /// with the warnings collected on the way.
 pub fn make_import_json(
     args: ImportJsonArgs,
-) -> Result<(ExportSimulation, Vec<String>)> {
+) -> Result<(ExportSimulation, Vec<String>, std::time::Duration)> {
     let structure_hash =
         get_file_hash(&args.input_dir.join(&args.meta.structure_file_name))?;
 
@@ -1067,12 +1075,14 @@ pub fn make_import_json(
 
     let unique_file_hash_string = get_unique_file_hash(&args.meta, args.input_dir);
 
+    let blast_start = Instant::now();
     let (uniprots, uniprot_warnings) = get_uniprot_entries(
         args.meta.uniprot_ids.clone(),
         &fasta_sequence_file,
         args.blast_dir,
         args.blast_num_threads,
     )?;
+    let blast_elapsed = blast_start.elapsed();
 
     let (ligands, ligand_warnings) = resolve_ligands(
         args.meta.ligands.as_ref(),
@@ -1181,7 +1191,7 @@ pub fn make_import_json(
     let file = File::create(args.import_json)?;
     writeln!(&file, "{}", &serde_json::to_string_pretty(&export)?)?;
 
-    Ok((export.simulation, warnings))
+    Ok((export.simulation, warnings, blast_elapsed))
 }
 
 // --------------------------------------------------

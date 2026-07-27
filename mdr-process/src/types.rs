@@ -563,6 +563,17 @@ pub struct ProcessResult {
 
     /// Non-fatal errors/warnings collected during processing.
     pub warnings: Vec<String>,
+
+    /// Wall-clock time spent in the parallel trajectory-processing step.
+    pub trajectory_processing_elapsed: std::time::Duration,
+
+    /// Wall-clock time spent on the BLAST/UniProt search
+    /// (`get_uniprot_entries`).
+    pub blast_elapsed: std::time::Duration,
+
+    /// Wall-clock time spent pushing processed files to iRODS
+    /// (`run_push`). `None` on a dry run, which skips the push.
+    pub push_elapsed: Option<std::time::Duration>,
 }
 
 // --------------------------------------------------
