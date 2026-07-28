@@ -11,7 +11,7 @@ use libmdrepo::{
     common::{get_md5, read_file},
     constants::MAX_FILE_SIZE_BYTES,
 };
-use log::{debug, info};
+use log::{debug, info, warn};
 use mdr_db::{
     models::{NewUploadInstance, NewUploadMessage, TicketUpdate, UploadInstanceUpdate},
     ops,
@@ -206,6 +206,23 @@ pub fn process(args: &TicketArgs) -> Result<()> {
         args.ticket_id,
         start.elapsed()
     );
+
+    // The ticket's files have served their purpose once every landing imported
+    // and pushed, so reclaim the disk unless asked to keep them. A failed
+    // landing's files stay put for the operator to inspect and re-run against
+    // (processing is never retried automatically), and a dry run has imported
+    // nothing, so neither is a completion worth cleaning up after. Removing
+    // `ticket_dir` takes both the download and the "processed" directories
+    // `process` wrote inside each landing.
+    if all_ok && !args.dry_run && !args.preserve {
+        debug!(r#"Removing "{}""#, ticket_dir.display());
+        if let Err(e) = fs::remove_dir_all(ticket_dir) {
+            // Don't fail the run over this: the ticket is imported, and a
+            // non-zero exit would send an operator to re-run work that is
+            // already done. Say so loudly instead.
+            warn!(r#"Failed to remove "{}": {e}"#, ticket_dir.display());
+        }
+    }
 
     // Fail the whole run if any landing failed, so callers (and the exit code)
     // see the failure rather than a false success. List each failed directory

@@ -145,6 +145,10 @@ pub struct TicketArgs {
     #[arg(long)]
     pub skip_download: bool,
 
+    /// Preserve the ticket's downloaded/processed files on success
+    #[arg(long)]
+    pub preserve: bool,
+
     /// Threads for each `blastp` search (`-num_threads`)
     #[arg(long, value_name = "N", default_value_t = DEFAULT_BLAST_NUM_THREADS)]
     pub blast_num_threads: usize,
