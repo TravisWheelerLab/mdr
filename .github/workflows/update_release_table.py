@@ -7,9 +7,17 @@ import re
 import json
 from typing import NamedTuple, Optional, TextIO
 
-# GitHub repository details
-REPO = "TravisWheelerLab/mdr"
+# GitHub repository details. Prefer the value Actions provides so this
+# keeps working across a rename -- the hardcoded fallback said
+# "TravisWheelerLab/mdr" long after the repo became "mdrepo-rs", and only
+# worked because the API follows the rename redirect.
+REPO = os.getenv("GITHUB_REPOSITORY", "TravisWheelerLab/mdrepo-rs")
 API_URL = f"https://api.github.com/repos/{REPO}/releases"
+
+# Heading that opens the section this script owns. Everything from here
+# to the end of the body is generated, so it can be replaced wholesale
+# while anything above it is left alone.
+ASSETS_HEADING = "### Release Assets"
 
 
 class ReleaseInfo(NamedTuple):
@@ -54,10 +62,35 @@ def main() -> None:
     if release := find_release_by_version(releases, args.version):
         print("Release '{}' has {} assets".format(args.version, len(release["assets"])))
         markdown_table = generate_markdown_table(release)
-        update_release_body(release["id"], markdown_table)
+        body = merge_body(release.get("body"), markdown_table)
+        update_release_body(release["id"], body)
         print(f"Release '{args.version}' updated successfully.")
     else:
         print(f"Release version '{args.version}' not found.")
+
+
+# --------------------------------------------------
+def merge_body(existing: Optional[str], table: str) -> str:
+    """
+    Put the asset table below whatever notes the release already has.
+
+    This used to PATCH the body with the table alone, which silently
+    threw away the release notes create-gh-release-action had just taken
+    from the tag message -- every release came out as a bare table.
+
+    Only the generated section is replaced, so re-running does not stack
+    up duplicate tables or separators.
+    """
+
+    notes = (existing or "").split(ASSETS_HEADING)[0]
+
+    # Drop the separator a previous run added, or it accumulates.
+    notes = re.sub(r"[\r\n]+-{3,}\s*$", "", notes.rstrip())
+
+    if not notes.strip():
+        return table
+
+    return f"{notes}\n\n---\n\n{table}"
 
 
 # --------------------------------------------------
