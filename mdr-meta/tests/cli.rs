@@ -11,6 +11,7 @@ struct RunArgs<'a> {
     args: &'a [String],
     stdout: Option<&'a str>,
     stderr: Option<&'a str>,
+    exit_code: Option<i32>,
 }
 
 // --------------------------------------------------
@@ -50,6 +51,10 @@ fn run(args: RunArgs) -> Result<()> {
         assert_eq!(stderr.trim(), expected.trim());
     }
 
+    if let Some(expected) = args.exit_code {
+        assert_eq!(output.status.code(), Some(expected));
+    }
+
     Ok(())
 }
 
@@ -60,6 +65,7 @@ fn check_ok1() -> Result<()> {
         args: &["check".to_string(), input_path("ok1.toml")],
         stdout: Some("empty.txt"),
         stderr: None,
+        exit_code: Some(0),
     })
 }
 
@@ -70,7 +76,79 @@ fn check_bad1() -> Result<()> {
         args: &["check".to_string(), input_path("bad1.toml")],
         stdout: Some("expected.bad1.txt"),
         stderr: None,
+        exit_code: Some(1),
     })
+}
+
+// --------------------------------------------------
+// One bad file among several must still fail the run, or a batch check
+// reports success while hiding the file that needs fixing.
+#[test]
+fn check_mixed_exits_1() -> Result<()> {
+    run(RunArgs {
+        args: &[
+            "check".to_string(),
+            input_path("ok1.toml"),
+            input_path("bad1.toml"),
+        ],
+        stdout: None,
+        stderr: None,
+        exit_code: Some(1),
+    })
+}
+
+// --------------------------------------------------
+// Unparseable input is invalid metadata (exit 1), not a tool failure.
+// bad2.toml is a v1-era file, so deny_unknown_fields rejects it outright.
+#[test]
+fn check_unparseable_exits_1() -> Result<()> {
+    Command::cargo_bin(PRG)?
+        .args(["check", &input_path("bad2.toml")])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("Failed to parse input"));
+
+    Ok(())
+}
+
+// --------------------------------------------------
+// A file that cannot be read is also reported per-file, so the remaining
+// filenames are still checked.
+#[test]
+fn check_missing_file_exits_1() -> Result<()> {
+    run(RunArgs {
+        args: &["check".to_string(), input_path("no/such/file.toml")],
+        stdout: None,
+        stderr: None,
+        exit_code: Some(1),
+    })
+}
+
+// --------------------------------------------------
+// Checking no files at all must not report success.
+#[test]
+fn check_no_files_fails() -> Result<()> {
+    Command::cargo_bin(PRG)?
+        .arg("check")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Usage"));
+
+    Ok(())
+}
+
+// --------------------------------------------------
+// Exit 2 is reserved for "the program could not do its job," so it must
+// not be produced by ordinary invalid metadata.
+#[test]
+fn check_never_exits_2() -> Result<()> {
+    let output = Command::cargo_bin(PRG)?
+        .args(["check", &input_path("bad1.toml")])
+        .output()?;
+
+    assert_ne!(output.status.code(), Some(2));
+
+    Ok(())
 }
 
 // --------------------------------------------------
@@ -80,6 +158,7 @@ fn example_toml() -> Result<()> {
         args: &["eg".to_string()],
         stdout: Some("expected.example.toml"),
         stderr: None,
+        exit_code: Some(0),
     })
 }
 
@@ -90,6 +169,7 @@ fn example_json() -> Result<()> {
         args: &["eg".to_string(), "-f".to_string(), "json".to_string()],
         stdout: Some("expected.example.json"),
         stderr: None,
+        exit_code: Some(0),
     })
 }
 
@@ -100,6 +180,7 @@ fn to_json() -> Result<()> {
         args: &["to-json".to_string(), input_path("ok1.toml")],
         stdout: Some("ok1.json"),
         stderr: None,
+        exit_code: Some(0),
     })
 }
 
@@ -110,5 +191,6 @@ fn to_toml() -> Result<()> {
         args: &["to-toml".to_string(), input_path("ok1.json")],
         stdout: Some("ok1.toml"),
         stderr: None,
+        exit_code: Some(0),
     })
 }

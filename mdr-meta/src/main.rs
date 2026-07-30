@@ -12,36 +12,56 @@ use std::{
 };
 
 // --------------------------------------------------
+// Exit codes, following the convention grep uses:
+//   0 = OK
+//   1 = the metadata is invalid (the errors are on stdout)
+//   2 = this program could not do its job
+// Callers must be able to tell "your TOML is bad" from "the check never
+// ran," so do not collapse 1 and 2 into a single failure code.
 fn main() {
-    if let Err(e) = run(Cli::parse()) {
-        eprintln!("Error: {e}");
-        std::process::exit(1);
+    match run(Cli::parse()) {
+        Ok(true) => (),
+        Ok(false) => std::process::exit(1),
+        Err(e) => {
+            eprintln!("Error: {e}");
+            std::process::exit(2);
+        }
     }
 }
 
 // --------------------------------------------------
-fn run(args: Cli) -> Result<()> {
+/// Returns whether the input passed. Only `check` can return false:
+/// invalid metadata is a result to report, not an error to raise.
+fn run(args: Cli) -> Result<bool> {
     match &args.command {
         Some(Command::Check(args)) => {
             let num_files = args.filenames.len();
+            let mut num_invalid = 0;
+
             for filename in &args.filenames {
                 if num_files > 1 {
                     println!("==> {filename} <==")
                 }
-                match parse_file(filename) {
-                    Ok(meta) => {
-                        let opts = if args.no_id {
-                            Some(MetaCheckOptions {
-                                allow_no_pdb_uniprot: true,
-                            })
-                        } else {
-                            None
-                        };
-                        println!("{}", meta.check(opts).join("\n"))
-                    }
-                    Err(e) => println!("{e}"),
+
+                let opts = args.no_id.then_some(MetaCheckOptions {
+                    allow_no_pdb_uniprot: true,
+                });
+
+                // A file that will not parse is invalid metadata, so it
+                // is reported like any other finding rather than aborting
+                // the remaining files.
+                let errors = match parse_file(filename) {
+                    Ok(meta) => meta.check(opts),
+                    Err(e) => vec![e.to_string()],
+                };
+
+                if !errors.is_empty() {
+                    num_invalid += 1;
+                    println!("{}", errors.join("\n"));
                 }
             }
+
+            return Ok(num_invalid == 0);
         }
         Some(Command::Eg(args)) => {
             let mut out_file = open_outfile(&args.outfile)?;
@@ -99,7 +119,7 @@ fn run(args: Cli) -> Result<()> {
         _ => unreachable!(),
     }
 
-    Ok(())
+    Ok(true)
 }
 
 // --------------------------------------------------

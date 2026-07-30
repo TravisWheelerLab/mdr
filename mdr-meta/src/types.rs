@@ -123,7 +123,9 @@ pub struct ToTomlArgs {
 #[command(alias = "ch")]
 pub struct CheckArgs {
     /// Input filename or "-" for STDIN
-    #[arg(value_name = "FILE", num_args = 1..)]
+    // "required" as well as "num_args", or checking nothing at all is a
+    // pass: num_args only constrains the arity when the arg is present.
+    #[arg(value_name = "FILE", num_args = 1.., required = true)]
     pub filenames: Vec<String>,
 
     /// Allow missing PDB/Uniprot IDs
