@@ -218,6 +218,21 @@ fn find_user_id_by_orcid_matches_only_orcid_provider() {
 }
 
 #[test]
+fn find_user_id_by_username_matches_exact_username() {
+    let mut c = conn_or_skip!();
+    let uid = seed_user(&mut c, "usernametest");
+
+    assert_eq!(
+        ops::find_user_id_by_username(&mut c, "user-usernametest").unwrap(),
+        Some(uid)
+    );
+    assert_eq!(
+        ops::find_user_id_by_username(&mut c, "does-not-exist").unwrap(),
+        None
+    );
+}
+
+#[test]
 fn find_software_matches_null_version() {
     let mut c = conn_or_skip!();
     let versionless = ops::insert_software(

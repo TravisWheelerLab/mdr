@@ -1851,6 +1851,20 @@ pub fn find_user_id_by_orcid(
         .optional()
 }
 
+/// User id for a username. Used to resolve fixed system accounts (e.g. the
+/// admin user imports are attributed to) by a stable, self-documenting name
+/// rather than a value like an ORCID that only means something by convention.
+pub fn find_user_id_by_username(
+    conn: &mut PgConnection,
+    uname: &str,
+) -> QueryResult<Option<i64>> {
+    md_user::table
+        .filter(md_user::username.eq(uname))
+        .select(md_user::id)
+        .first::<i64>(conn)
+        .optional()
+}
+
 /// Software id by its natural key `(name, version)`. Mirrors `create_software`'s
 /// lookup. NOTE: this diverges deliberately from the Python for a NULL version —
 /// the script queries `version = %s`, which never matches when the version is

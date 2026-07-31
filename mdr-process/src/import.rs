@@ -38,9 +38,10 @@ use mdr_db::{
 };
 use std::path::Path;
 
-/// Uploads made under this ORCID belong to the MDRepo admins, not to a user, so
-/// the simulation is left with no `created_by_id`.
+/// Uploads made under this ORCID are attributed to the fixed `mdrepo_admin`
+/// account rather than a specific contributor.
 const ADMIN_ORCID: &str = "0000-0000-0000-0000";
+const ADMIN_USERNAME: &str = "mdrepo_admin";
 
 /// Solute names the frontend expects in their ionic form. Chloride is an anion:
 /// the script's table said `Cl+`, which is why we diverge from it here.
@@ -252,10 +253,13 @@ fn sampling_frequency(sim: &ExportSimulation) -> f64 {
 
 // --------------------------------------------------
 /// The owning user for an upload, looked up from the lead contributor's ORCID.
-/// Admin uploads have no owner; any other unknown ORCID is fatal.
+/// Admin uploads resolve to the fixed `mdrepo_admin` account; any other
+/// unknown ORCID is fatal.
 fn lead_contributor_id(conn: &mut PgConnection, orcid: &str) -> Result<Option<i64>> {
     if orcid == ADMIN_ORCID {
-        return Ok(None);
+        return ops::find_user_id_by_username(conn, ADMIN_USERNAME)?
+            .ok_or_else(|| anyhow!("Admin user '{ADMIN_USERNAME}' not found"))
+            .map(Some);
     }
 
     ops::find_user_id_by_orcid(conn, orcid)?
