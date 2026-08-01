@@ -95,7 +95,6 @@ pub const VALID_WATER_MODEL: &[&str] = &[
 // - .nc / .ncdf — NetCDF trajectory
 // - .mdcrd / .crd — ASCII coordinate trajectory
 // - .dcd — DCD binary trajectory (also used by NAMD/CHARMM)
-// - .rst / .rst7 — restart/checkpoint file
 // NAMD / CHARMM
 // - .dcd — DCD binary trajectory
 // - .coor — coordinate file
@@ -117,8 +116,7 @@ pub const VALID_WATER_MODEL: &[&str] = &[
 // - .trj — generic trajectory (various tools)
 // - .binpos — binary positions (AMBER)
 pub const TRAJECTORY_FILE_EXTS: &[&str] = &[
-    "coor", "dcd", "edr", "mdc", "nc", "ncdf", "rst", "rst7", "tng", "trj", "trr",
-    "vel", "xtc",
+    "coor", "dcd", "edr", "mdc", "nc", "ncdf", "tng", "trj", "trr", "vel", "xtc",
 ];
 
 // Here are common structure file extensions used in molecular dynamics simulations:
@@ -161,7 +159,7 @@ pub const TRAJECTORY_FILE_EXTS: &[&str] = &[
 // - .pdb — also frequently written/read, though CHARMM's PDB handling has some
 // quirks (segid in cols 73–76).
 // Restart files (.rst) contain coordinates plus velocities and box info.
-pub const STRUCTURE_FILE_EXTS: &[&str] = &["pdb", "gro", "crd", "cor"];
+pub const STRUCTURE_FILE_EXTS: &[&str] = &["pdb", "gro", "crd", "cor", "rst", "rst7", "ncrst"];
 
 // Here are common topology file extensions used in molecular dynamics simulations:
 // GROMACS
