@@ -159,7 +159,8 @@ pub const TRAJECTORY_FILE_EXTS: &[&str] = &[
 // - .pdb — also frequently written/read, though CHARMM's PDB handling has some
 // quirks (segid in cols 73–76).
 // Restart files (.rst) contain coordinates plus velocities and box info.
-pub const STRUCTURE_FILE_EXTS: &[&str] = &["pdb", "gro", "crd", "cor", "rst", "rst7", "ncrst"];
+pub const STRUCTURE_FILE_EXTS: &[&str] =
+    &["pdb", "gro", "crd", "cor", "rst", "rst7", "ncrst"];
 
 // Here are common topology file extensions used in molecular dynamics simulations:
 // GROMACS
