@@ -4,7 +4,7 @@
     "traj.xtc"
   ],
   "structure_file_name": "struct.pdb",
-  "topology_file_name": "topology.gro",
+  "topology_file_name": "topology.tpr",
   "temperature_kelvin": 300,
   "integration_timestep_fs": 2,
   "short_description": "<short_description> (required)",

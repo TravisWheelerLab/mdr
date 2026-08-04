@@ -85,127 +85,130 @@ pub const VALID_WATER_MODEL: &[&str] = &[
     "q-TIP4P/F",
 ];
 
-// Here are common trajectory file extensions used in molecular dynamics simulations:
-// GROMACS
-// - .xtc — compressed trajectory (positions only)
-// - .trr — full-precision trajectory (positions, velocities, forces)
-// - .tng — trajectory next generation format
-// - .edr — energy trajectory
-// AMBER
-// - .nc / .ncdf — NetCDF trajectory
-// - .mdcrd / .crd — ASCII coordinate trajectory
-// - .dcd — DCD binary trajectory (also used by NAMD/CHARMM)
-// NAMD / CHARMM
-// - .dcd — DCD binary trajectory
-// - .coor — coordinate file
-// - .vel — velocity file
-// LAMMPS
-// - .lammpstrj — LAMMPS dump trajectory
-// - .dump — generic dump format
-// OpenMM
-// - .dcd — DCD binary trajectory
-// - .pdb — PDB trajectory (multi-model)
-// Desmond / Schrödinger
-// - .dtr — Desmond trajectory directory format
-// - .xtc — also supported
-// General / Multi-software
-// - .pdb — multi-model PDB
-// - .xyz — multi-frame XYZ
-// - .h5 / .hdf5 — HDF5-based trajectories (MDTraj, etc.)
-// - .mol2 — multi-model Mol2
-// - .trj — generic trajectory (various tools)
-// - .binpos — binary positions (AMBER)
-pub const TRAJECTORY_FILE_EXTS: &[&str] = &[
-    "coor", "dcd", "edr", "mdc", "nc", "ncdf", "tng", "trj", "trr", "vel", "xtc",
-];
-
-// Here are common structure file extensions used in molecular dynamics simulations:
-// Universal / Multi-software
-// - .pdb — Protein Data Bank format (most widely used)
-// - .cif / .mmcif — macromolecular crystallographic information file
-// - .mol — MDL Molfile (small molecules)
-// - .mol2 — Tripos Mol2 (atoms, bonds, charges)
-// - .xyz — simple Cartesian coordinate format
-// - .sdf — structure data file (small molecules, ligands)
-// GROMACS
-// - .gro — GROMACS coordinate file (positions + box vectors)
-// AMBER
-// - .inpcrd / .crd — input coordinate file
-// - .rst / .rst7 — restart file (coordinates + velocities)
-// - .ncrst — NetCDF restart file
-// NAMD / CHARMM
-// - .crd — CHARMM coordinate file
-// - .cor — CHARMM coordinate file (alternate extension)
-// - .dms — DESRES molecular structure file
-// Desmond / Schrödinger
-// - .mae / .maegz — Maestro structure file (compressed)
-// - .cms — composite model system
-// LAMMPS
-// - .data — LAMMPS data file (includes coordinates)
-// - .dump — LAMMPS dump snapshot
-// OpenBabel / Cheminformatics
-// - .smi / .smiles — SMILES string
-// - .inchi — IUPAC International Chemical Identifier
-// - .pqr — PDB with charge and radius (used in PB/SA calculations)
-// Crystallography / Periodic Systems
-// - .cif — crystallographic information file
-// - .vasp / POSCAR — VASP structure format
-// - .config / .cfg — DL_POLY config file
-// - .lmp — LAMMPS structure (alternate extension)
-// CHARMM
-// - .crd / .cor — CHARMM's native coordinate format. Comes in standard and
-// extended (EXT) flavors; extended is needed for systems >99,999 atoms and is
-// now the common case.
-// - .pdb — also frequently written/read, though CHARMM's PDB handling has some
-// quirks (segid in cols 73–76).
-// Restart files (.rst) contain coordinates plus velocities and box info.
-pub const STRUCTURE_FILE_EXTS: &[&str] =
-    &["pdb", "gro", "crd", "cor", "rst", "rst7", "ncrst"];
-
-// Here are common topology file extensions used in molecular dynamics simulations:
-// GROMACS
-// - .top — main topology file
-// - .itp — include topology (force field parameters, molecule definitions)
-// - .tpr — portable binary run input (compiled topology + parameters)
-// AMBER
-// - .prmtop / .parm7 — parameter/topology file
-// - .parm — older AMBER topology format
-// NAMD / CHARMM
-// - .psf — protein structure file (bonds, angles, atom types)
-// - .rtf / .resi — residue topology file
-// - .prm / .par — parameter file
-// LAMMPS
-// - .data — LAMMPS data file (topology + force field)
-// - .in — input script (often contains topology info)
-// OpenMM / ParmEd
-// - .xml — OpenMM system XML file
-// - .prmtop — AMBER topology (widely supported)
-// Desmond / Schrödinger
-// - .cms — composite model system (topology + coordinates)
-// - .msj — multisim job file
-// General / Structure Files (often double as topology)
-// - .pdb — Protein Data Bank format
-// - .gro — GROMACS structure file (coordinates + box)
-// - .mol2 — Tripos Mol2 (bonds + atom types)
-// - .cif / .mmcif — crystallographic information file
-// - .mae / .maegz — Maestro format (Schrödinger)
-// Force Field Related
-// - .xml — OpenMM force field definitions
-// - .frcmod — AMBER force field modification file
-// - .str — CHARMM stream file (partial charges, parameters)
-// - .ff — generic force field file
+// Per-engine file format conventions, sourced from a table supplied by Ken
+// (2026-08-04) and reconciled against prod (`md_uploaded_file.file_type`,
+// which records the actual role -- Structure/Topology/Trajectory -- a file
+// filled, not just what was uploaded). ACEMD and SPONGE have no upstream
+// documentation to cite; their rows are the single combination each software
+// uses 100% of the time in prod (7,459 and 565 simulations respectively,
+// zero exceptions). `edr` is in GROMACS's trajectory list because 800 prod
+// GROMACS simulations carry an energy file alongside `.xtc`, tagged
+// Trajectory by the same convention.
 //
-// CHARMM differs most from the AMBER-style "one big prmtop" model.
-// You typically need three things together:
-// - .psf — Protein Structure File. Per-system topology: atom list, bonds,
-// angles, dihedrals, impropers, CMAP cross-terms, optional Drude/lone-pair
-// sections. Standard and XPLOR/EXT variants exist; NAMD prefers XPLOR PSF.
-// - .rtf (or .top) — Residue Topology File. Force-field-level residue definitions.
-// - .prm (or .par) — Parameter File. Bonded and nonbonded parameters.
-// - .str — Stream files that can bundle RTF + PRM together (CGenFF distributes this way).
-pub const TOPOLOGY_FILE_EXTS: &[&str] = &[
-    "gro", "par", "parm7", "prm", "prmtop", "psf", "rtf", "str", "top", "tpr",
-];
+// CUSTOM has no entry: it is the deliberate escape hatch for pipelines that
+// don't follow any fixed convention, so it is exempt from combination
+// checking rather than being given a fabricated set of "valid" extensions.
+//
+// `xtc`/`mdc` are added to every engine's trajectory list (see
+// COMMON_TRAJECTORY_EXTS below) because they are conversion targets, not
+// engine tells -- a mismatch on structure/topology means what was declared
+// is not what was actually produced, but a trajectory alone being .xtc
+// doesn't mean that.
+//
+// This is the single source of truth for which extensions are valid, and
+// where: the old per-field STRUCTURE/TOPOLOGY/TRAJECTORY_FILE_EXTS lists were
+// a hand-maintained union of this same information, which is exactly how
+// ticket 1997 broke -- `rst7` existed in one list and needed to exist in
+// another. See `Meta::check`'s combination check in metadata.rs.
+pub struct EngineFileFormats {
+    pub topology: &'static [&'static str],
+    pub structure: &'static [&'static str],
+    pub trajectory: Vec<&'static str>,
+}
+
+// xtc and mdc are conversion/interchange trajectory formats produced by this
+// pipeline regardless of which engine ran the simulation -- e.g. MISATO's
+// AMBER runs were published as .h5 and converted to .xtc on import here --
+// so every engine accepts them on top of its own native trajectory formats.
+const COMMON_TRAJECTORY_EXTS: &[&str] = &["xtc", "mdc"];
+
+pub static ENGINE_FILE_FORMATS: Lazy<BTreeMap<&'static str, EngineFileFormats>> =
+    Lazy::new(|| {
+        let trajectory = |native: &[&'static str]| -> Vec<&'static str> {
+            let mut exts: Vec<&'static str> = native.to_vec();
+            for ext in COMMON_TRAJECTORY_EXTS {
+                if !exts.contains(ext) {
+                    exts.push(ext);
+                }
+            }
+            exts
+        };
+
+        BTreeMap::from([
+            (
+                "AMBER",
+                EngineFileFormats {
+                    topology: &["prmtop", "parm7", "top"],
+                    structure: &["inpcrd", "rst7", "restrt", "rst", "ncrst", "pdb"],
+                    trajectory: trajectory(&["nc", "netcdf", "mdcrd", "crd", "trj"]),
+                },
+            ),
+            (
+                "CHARMM",
+                EngineFileFormats {
+                    topology: &["psf", "prm", "par", "rtf", "str"],
+                    structure: &["pdb", "crd", "cor", "coor"],
+                    trajectory: trajectory(&["dcd"]),
+                },
+            ),
+            (
+                "NAMD",
+                EngineFileFormats {
+                    topology: &["psf", "prm", "par", "rtf", "str"],
+                    structure: &["pdb", "crd", "cor", "coor"],
+                    trajectory: trajectory(&["dcd"]),
+                },
+            ),
+            (
+                "GROMACS",
+                EngineFileFormats {
+                    topology: &["top", "itp", "tpr"],
+                    structure: &["gro", "pdb", "g96", "tpr"],
+                    trajectory: trajectory(&["xtc", "trr", "edr"]),
+                },
+            ),
+            (
+                "ACEMD",
+                EngineFileFormats {
+                    topology: &["psf"],
+                    structure: &["pdb"],
+                    trajectory: trajectory(&["xtc"]),
+                },
+            ),
+            (
+                "SPONGE",
+                EngineFileFormats {
+                    topology: &["gro"],
+                    structure: &["pdb"],
+                    trajectory: trajectory(&["xtc"]),
+                },
+            ),
+        ])
+    });
+
+// The per-field "is this extension recognized by any engine at all" lists,
+// derived from `ENGINE_FILE_FORMATS` rather than hand-maintained, so an
+// extension can't exist in one and be missing from another.
+fn union_exts<'a>(
+    select: impl Fn(&'a EngineFileFormats) -> &'a [&'static str],
+) -> Vec<&'static str> {
+    let mut exts: Vec<&'static str> = ENGINE_FILE_FORMATS
+        .values()
+        .flat_map(|fmt| select(fmt).iter().copied())
+        .collect();
+    exts.sort_unstable();
+    exts.dedup();
+    exts
+}
+
+pub static TRAJECTORY_FILE_EXTS: Lazy<Vec<&'static str>> =
+    Lazy::new(|| union_exts(|fmt| fmt.trajectory.as_slice()));
+
+pub static STRUCTURE_FILE_EXTS: Lazy<Vec<&'static str>> =
+    Lazy::new(|| union_exts(|fmt| fmt.structure));
+
+pub static TOPOLOGY_FILE_EXTS: Lazy<Vec<&'static str>> =
+    Lazy::new(|| union_exts(|fmt| fmt.topology));
 
 const ACEMD_VERSIONS: &[&str] = &[
     "4.0.20", "4.0.18", "4.0.17", "4.0.16", "4.0.15", "4.0.11", "4.0.9", "4.0.1",

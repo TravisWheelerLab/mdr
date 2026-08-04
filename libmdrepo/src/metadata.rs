@@ -122,6 +122,19 @@ pub struct Meta {
     pub is_embargoed: Option<bool>,
 }
 
+struct FormatCombination {
+    structure_ext: String,
+    topology_ext: String,
+    trajectory_exts: Vec<String>,
+    matched_engines: Vec<&'static str>,
+}
+
+impl FormatCombination {
+    fn trajectory_display(&self) -> String {
+        format!(".{}", self.trajectory_exts.join(", ."))
+    }
+}
+
 impl Meta {
     pub fn all_filenames(&self) -> Vec<String> {
         let mut filenames = vec![
@@ -170,26 +183,23 @@ impl Meta {
             ))
         }
 
-        // Check file extensions of required files
-        let ext_checks = [
-            (
-                "structure_file_name",
-                &self.structure_file_name,
-                constants::STRUCTURE_FILE_EXTS,
-            ),
-            (
-                "topology_file_name",
-                &self.topology_file_name,
-                constants::TOPOLOGY_FILE_EXTS,
-            ),
+        // Each of structure/topology/trajectory needs *an* extension to be
+        // checkable at all -- that much is field-independent. Whether it is
+        // the *right* extension is not: that depends on the other two
+        // fields and is decided below, as a set, against
+        // constants::ENGINE_FILE_FORMATS, not against a flat per-field
+        // allowlist. A union-of-all-engines allowlist per field is exactly
+        // how ticket 1997 slipped through: individually "valid" extensions
+        // that no single engine actually produces together.
+        let name_checks = [
+            ("structure_file_name", &self.structure_file_name),
+            ("topology_file_name", &self.topology_file_name),
         ];
 
         // Ensure that each filename is present only once
         let mut file_count: HashMap<String, usize> = HashMap::new();
-        for (fieldname, filename, valid_exts) in ext_checks {
-            if let Some(msg) =
-                Self::check_file_extensions(fieldname, filename, valid_exts)
-            {
+        for (fieldname, filename) in name_checks {
+            if let Some(msg) = Self::check_has_extension(fieldname, filename) {
                 messages.push(msg);
             }
 
@@ -200,10 +210,9 @@ impl Meta {
         }
 
         for (i, filename) in self.trajectory_file_names.iter().enumerate() {
-            if let Some(msg) = Self::check_file_extensions(
+            if let Some(msg) = Self::check_has_extension(
                 &format!("trajectory_file_names[{}]", i + 1),
                 filename,
-                constants::TRAJECTORY_FILE_EXTS,
             ) {
                 messages.push(msg);
             }
@@ -262,6 +271,38 @@ impl Meta {
             }
         }
 
+        // Check that structure/topology/trajectory extensions form a
+        // combination the declared engine could actually have produced.
+        // CUSTOM is the deliberate escape hatch for pipelines with no fixed
+        // convention, so it is exempt. Two distinct failures, both fatal:
+        // the combination matches no engine at all (incompatible mixing),
+        // or it matches some *other* engine but not the declared one
+        // (software_name does not describe what was actually submitted).
+        if self.software_name != "CUSTOM"
+            && let Some(combo) = self.format_combination()
+        {
+            if combo.matched_engines.is_empty() {
+                messages.push(format!(
+                    "File formats are incompatible: structure \".{}\", \
+                    topology \".{}\", trajectory {} match no supported \
+                    engine's convention",
+                    combo.structure_ext,
+                    combo.topology_ext,
+                    combo.trajectory_display(),
+                ));
+            } else if !combo.matched_engines.contains(&self.software_name.as_str()) {
+                messages.push(format!(
+                    "software_name is \"{}\" but structure/topology/\
+                    trajectory extensions (.{}, .{}, {}) match {} instead",
+                    self.software_name,
+                    combo.structure_ext,
+                    combo.topology_ext,
+                    combo.trajectory_display(),
+                    combo.matched_engines.join(" or "),
+                ));
+            }
+        }
+
         if self.pdb_id.is_none()
             && self.uniprot_ids.is_none()
             && !options.is_some_and(|val| val.allow_no_pdb_uniprot)
@@ -273,21 +314,59 @@ impl Meta {
         messages
     }
 
-    fn check_file_extensions(
-        fieldname: &str,
-        filename: &str,
-        valid_extensions: &[&str],
-    ) -> Option<String> {
-        if let Some(ext) = Path::new(filename).extension() {
-            let ext = ext.to_string_lossy().to_string();
-            if valid_extensions.contains(&ext.as_str()) {
-                None
-            } else {
-                Some(format!(
-                    r#"{fieldname}: Invalid extension "{ext}"; choose from {}"#,
-                    valid_extensions.join(", ")
-                ))
-            }
+    /// Extracts the declared structure/topology/trajectory extensions and
+    /// finds which engines in `constants::ENGINE_FILE_FORMATS` accept all
+    /// three at once. Returns None when a filename is missing an extension
+    /// entirely -- that is already reported by `check_file_extensions`, so
+    /// there is nothing useful to add here.
+    fn format_combination(&self) -> Option<FormatCombination> {
+        let ext_of = |filename: &str| -> Option<String> {
+            Path::new(filename)
+                .extension()
+                .map(|e| e.to_string_lossy().to_string())
+        };
+
+        let structure_ext = ext_of(&self.structure_file_name)?;
+        let topology_ext = ext_of(&self.topology_file_name)?;
+        if self.trajectory_file_names.is_empty() {
+            return None;
+        }
+        let trajectory_exts: Vec<String> = self
+            .trajectory_file_names
+            .iter()
+            .filter_map(|f| ext_of(f))
+            .collect();
+        if trajectory_exts.len() != self.trajectory_file_names.len() {
+            return None;
+        }
+
+        let matched_engines: Vec<&'static str> = constants::ENGINE_FILE_FORMATS
+            .iter()
+            .filter(|(_, fmt)| {
+                fmt.structure.contains(&structure_ext.as_str())
+                    && fmt.topology.contains(&topology_ext.as_str())
+                    && trajectory_exts
+                        .iter()
+                        .all(|ext| fmt.trajectory.contains(&ext.as_str()))
+            })
+            .map(|(&name, _)| name)
+            .collect();
+
+        Some(FormatCombination {
+            structure_ext,
+            topology_ext,
+            trajectory_exts,
+            matched_engines,
+        })
+    }
+
+    /// Only checks that `filename` has an extension at all -- whether it is
+    /// the *right* one is the combination check's job (see
+    /// `format_combination`), since that depends jointly on all three of
+    /// structure/topology/trajectory, not on this field alone.
+    fn check_has_extension(fieldname: &str, filename: &str) -> Option<String> {
+        if Path::new(filename).extension().is_some() {
+            None
         } else {
             Some(format!(
                 r#"{fieldname}: filename "{filename}" is missing extension"#
@@ -332,7 +411,7 @@ impl Meta {
             lead_contributor_orcid: "0000-0000-0000-0000".to_string(),
             trajectory_file_names: vec!["traj.xtc".to_string()],
             structure_file_name: "struct.pdb".to_string(),
-            topology_file_name: "topology.gro".to_string(),
+            topology_file_name: "topology.tpr".to_string(),
             temperature_kelvin: 300,
             integration_timestep_fs: 2,
             short_description: "<short_description> (required)".to_string(),
@@ -396,7 +475,7 @@ impl Meta {
             lead_contributor_orcid: "0000-0000-0000-0000".to_string(),
             trajectory_file_names: vec!["traj.xtc".to_string()],
             structure_file_name: "struct.pdb".to_string(),
-            topology_file_name: "topology.gro".to_string(),
+            topology_file_name: "topology.tpr".to_string(),
             temperature_kelvin: 300,
             integration_timestep_fs: 2,
             short_description: "<short_description> (required)".to_string(),
@@ -1200,7 +1279,7 @@ mod tests {
         let meta = Meta::example_minimal();
         let filenames = meta.all_filenames();
         assert!(filenames.contains(&"struct.pdb".to_string()));
-        assert!(filenames.contains(&"topology.gro".to_string()));
+        assert!(filenames.contains(&"topology.tpr".to_string()));
         assert!(filenames.contains(&"traj.xtc".to_string()));
         assert_eq!(filenames.len(), 3);
     }
@@ -1210,7 +1289,7 @@ mod tests {
         let meta = Meta::example();
         let filenames = meta.all_filenames();
         assert!(filenames.contains(&"struct.pdb".to_string()));
-        assert!(filenames.contains(&"topology.gro".to_string()));
+        assert!(filenames.contains(&"topology.tpr".to_string()));
         assert!(filenames.contains(&"traj.xtc".to_string()));
         assert!(filenames.contains(&"README.txt".to_string()));
         assert_eq!(filenames.len(), 4);
@@ -1313,6 +1392,10 @@ mod tests {
         meta.pdb_id = Some("5aom".to_string());
         meta.software_name = "AMBER".to_string();
         meta.software_version = "2020".to_string();
+        // example_minimal()'s default topology_file_name is GROMACS-shaped
+        // (.tpr); swap in an AMBER-native one so this test isn't also
+        // exercising the format-combination check.
+        meta.topology_file_name = "topology.prmtop".to_string();
         let errors = meta.check(None);
         assert!(
             !errors.iter().any(|e| e.starts_with("software_")),
@@ -1321,6 +1404,12 @@ mod tests {
     }
 
     // --- file extension checks ---
+    //
+    // An extension that no engine recognizes at all can never be part of a
+    // valid combination, so these are caught by the combination check (see
+    // "structure/topology/trajectory combination checks" below) rather than
+    // by an independent per-field allowlist -- there is no longer a
+    // per-field "invalid extension" message distinct from that.
 
     #[test]
     fn meta_check_invalid_structure_extension() {
@@ -1330,7 +1419,7 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|e| e.starts_with("structure_file_name:") && e.contains("xyz")),
+                .any(|e| e.contains("incompatible") && e.contains("xyz")),
             "Expected structure extension error, got: {errors:?}"
         );
     }
@@ -1343,7 +1432,7 @@ mod tests {
         assert!(
             errors
                 .iter()
-                .any(|e| e.starts_with("topology_file_name:") && e.contains("xyz")),
+                .any(|e| e.contains("incompatible") && e.contains("xyz")),
             "Expected topology extension error, got: {errors:?}"
         );
     }
@@ -1354,10 +1443,124 @@ mod tests {
         meta.trajectory_file_names = vec!["traj.mp4".to_string()];
         let errors = meta.check(None);
         assert!(
-            errors.iter().any(
-                |e| e.starts_with("trajectory_file_names[1]:") && e.contains("mp4")
-            ),
+            errors
+                .iter()
+                .any(|e| e.contains("incompatible") && e.contains("mp4")),
             "Expected trajectory extension error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn meta_check_empty_trajectory_file_names_is_fatal() {
+        // trajectory_file_names carries #[validate(length(min = 1))], so
+        // this is already fatal via self.validate() before
+        // format_combination() is ever reached -- its is_empty() check is
+        // just declining to do meaningless combination work on data that's
+        // already been flagged, not silently accepting an empty list.
+        let mut meta = Meta::example_minimal();
+        meta.trajectory_file_names = vec![];
+        let errors = meta.check(None);
+        assert!(
+            errors.iter().any(
+                |e| e.starts_with("trajectory_file_names:") && e.contains("length")
+            ),
+            "Expected a fatal length error for empty trajectory_file_names, got: {errors:?}"
+        );
+    }
+
+    // --- structure/topology/trajectory combination checks ---
+
+    fn no_id_opts() -> Option<MetaCheckOptions> {
+        Some(MetaCheckOptions {
+            allow_no_pdb_uniprot: true,
+        })
+    }
+
+    #[test]
+    fn meta_combination_matching_declared_engine_is_clean() {
+        let mut meta = Meta::example_minimal();
+        meta.software_name = "GROMACS".to_string();
+        meta.software_version = "2024.4".to_string();
+        meta.structure_file_name = "struct.gro".to_string();
+        meta.topology_file_name = "topology.top".to_string();
+        meta.trajectory_file_names = vec!["traj.xtc".to_string()];
+        meta.additional_files = Some(vec![AdditionalFile {
+            file_name: "run.tpr".to_string(),
+            file_type: "Binary topology".to_string(),
+            description: None,
+        }]);
+        let errors = meta.check(no_id_opts());
+        assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
+    }
+
+    #[test]
+    fn meta_combination_amber_declared_with_xtc_trajectory_is_clean() {
+        // The real MISATO cohort in prod: software_name AMBER, structure and
+        // topology in AMBER's own shape, but trajectory .xtc because
+        // MISATO's published .h5 trajectories were converted to .xtc on
+        // import. xtc is accepted for every engine (see
+        // constants::ENGINE_FILE_FORMATS), so this is not a mismatch --
+        // see item 23 in utils/TODO.md.
+        let mut meta = Meta::example_minimal();
+        meta.software_name = "AMBER".to_string();
+        meta.software_version = "2020".to_string();
+        meta.structure_file_name = "struct.pdb".to_string();
+        meta.topology_file_name = "topology.top".to_string();
+        meta.trajectory_file_names = vec!["traj.xtc".to_string()];
+        let errors = meta.check(no_id_opts());
+        assert!(errors.is_empty(), "Expected no errors, got: {errors:?}");
+    }
+
+    #[test]
+    fn meta_combination_wrong_declared_engine_is_fatal() {
+        // .gro/.top/.trr is GROMACS's convention; nothing about it matches
+        // ACEMD's psf/pdb/xtc. Unlike a plain mismatch resolved by
+        // COMMON_TRAJECTORY_EXTS (see the AMBER/xtc case above), .trr isn't
+        // shared, so this is a genuine declared-vs-actual mismatch.
+        let mut meta = Meta::example_minimal();
+        meta.software_name = "ACEMD".to_string();
+        meta.software_version = "3.7.3".to_string();
+        meta.structure_file_name = "struct.gro".to_string();
+        meta.topology_file_name = "topology.top".to_string();
+        meta.trajectory_file_names = vec!["traj.trr".to_string()];
+        let errors = meta.check(no_id_opts());
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.starts_with("software_name") && e.contains("GROMACS")),
+            "Expected a mismatched-engine error naming GROMACS, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn meta_combination_matching_no_engine_is_fatal() {
+        let mut meta = Meta::example_minimal();
+        meta.software_name = "GROMACS".to_string();
+        meta.software_version = "2024.4".to_string();
+        // .gro is GROMACS-only for structure; .psf is CHARMM/NAMD/ACEMD-only
+        // for topology. No engine accepts both at once.
+        meta.structure_file_name = "struct.gro".to_string();
+        meta.topology_file_name = "topology.psf".to_string();
+        meta.trajectory_file_names = vec!["traj.dcd".to_string()];
+        let errors = meta.check(no_id_opts());
+        assert!(
+            errors.iter().any(|e| e.contains("incompatible")),
+            "Expected an incompatible-combination error, got: {errors:?}"
+        );
+    }
+
+    #[test]
+    fn meta_combination_custom_software_is_exempt() {
+        let mut meta = Meta::example_minimal();
+        meta.software_name = "CUSTOM".to_string();
+        meta.software_version = "NA".to_string();
+        meta.structure_file_name = "struct.pdb".to_string();
+        meta.topology_file_name = "topology.psf".to_string();
+        meta.trajectory_file_names = vec!["traj.nc".to_string()];
+        let errors = meta.check(no_id_opts());
+        assert!(
+            !errors.iter().any(|e| e.contains("incompatible")),
+            "CUSTOM should be exempt from combination checking, got: {errors:?}"
         );
     }
 
