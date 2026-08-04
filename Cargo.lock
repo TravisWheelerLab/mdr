@@ -2065,7 +2065,7 @@ dependencies = [
 
 [[package]]
 name = "mdr-meta"
-version = "0.3.18"
+version = "0.3.19"
 dependencies = [
  "anyhow",
  "assert_cmd",
@@ -2076,6 +2076,7 @@ dependencies = [
  "self_update",
  "strum",
  "strum_macros",
+ "tempfile",
 ]
 
 [[package]]

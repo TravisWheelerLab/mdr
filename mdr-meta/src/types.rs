@@ -1,5 +1,8 @@
-use clap::{Parser, ValueEnum, builder::PossibleValue};
-use std::path::PathBuf;
+use clap::{
+    Parser, ValueEnum,
+    builder::{PossibleValue, PossibleValuesParser},
+};
+use libmdrepo::constants::VALID_SOFTWARE;
 
 // --------------------------------------------------
 #[derive(Parser, Debug)]
@@ -67,7 +70,23 @@ pub struct EgArgs {
 
 #[derive(Debug, Parser)]
 pub struct GenArgs {
-    /// Output format
+    /// Simulation software/engine, e.g. GROMACS
+    ///
+    /// Required because some file extensions mean different things for
+    /// different engines (.gro is GROMACS's structure file but SPONGE's
+    /// topology file; .crd is AMBER's trajectory but CHARMM/NAMD's
+    /// structure), so files can't be classified correctly without knowing
+    /// which convention applies. Validated against the same software names
+    /// Meta::check() accepts.
+    #[arg(
+        short,
+        long,
+        value_name = "SOFTWARE",
+        value_parser = PossibleValuesParser::new(VALID_SOFTWARE.keys().copied())
+    )]
+    pub software: String,
+
+    /// Input directory (defaults to the current directory)
     #[arg(short, long, value_name = "DIR")]
     pub directory: Option<String>,
 
@@ -90,10 +109,6 @@ pub struct GenArgs {
     /// Topology filename
     #[arg(long, value_name = "TOPO")]
     pub topology: Option<String>,
-
-    /// TOML template
-    #[arg(long, value_name = "TMPL")]
-    pub template: Option<PathBuf>,
 }
 
 #[derive(Debug, Parser)]
@@ -134,7 +149,7 @@ pub struct CheckArgs {
 }
 
 // --------------------------------------------------
-#[derive(strum_macros::Display, PartialEq)]
+#[derive(Debug, strum_macros::Display, PartialEq)]
 pub enum FileType {
     Trajectory,
     Structure,

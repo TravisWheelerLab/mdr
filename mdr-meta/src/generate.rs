@@ -1,7 +1,10 @@
 use crate::types::{FileInfo, FileType, GenArgs};
 use anyhow::{Result, bail};
 use libmdrepo::{
-    constants::{STRUCTURE_FILE_EXTS, TOPOLOGY_FILE_EXTS, TRAJECTORY_FILE_EXTS},
+    constants::{
+        ENGINE_FILE_FORMATS, EngineFileFormats, STRUCTURE_FILE_EXTS,
+        TOPOLOGY_FILE_EXTS, TRAJECTORY_FILE_EXTS, VALID_SOFTWARE,
+    },
     metadata::{AdditionalFile, Contributor, Meta},
 };
 use std::{
@@ -12,6 +15,20 @@ use std::{
 
 // --------------------------------------------------
 pub fn generate(args: &GenArgs) -> Result<Meta> {
+    if !VALID_SOFTWARE.contains_key(args.software.as_str()) {
+        let valid_software_names: Vec<&str> = VALID_SOFTWARE.keys().copied().collect();
+        bail!(
+            r#"--software "{}" invalid, choose from {}"#,
+            args.software,
+            valid_software_names.join(", "),
+        );
+    }
+    // CUSTOM has no entry in ENGINE_FILE_FORMATS -- it's the deliberate
+    // escape hatch for pipelines with no fixed convention, so files are
+    // classified against "recognized by any engine at all" instead of one
+    // engine's own lists.
+    let engine_formats = ENGINE_FILE_FORMATS.get(args.software.as_str());
+
     let dir = args
         .directory
         .clone()
@@ -38,15 +55,7 @@ pub fn generate(args: &GenArgs) -> Result<Meta> {
             .extension()
             .map_or("".to_string(), |val| val.to_string_lossy().to_string());
 
-        let file_type = if TRAJECTORY_FILE_EXTS.contains(&ext.as_str()) {
-            FileType::Trajectory
-        } else if STRUCTURE_FILE_EXTS.contains(&ext.as_str()) {
-            FileType::Structure
-        } else if TOPOLOGY_FILE_EXTS.contains(&ext.as_str()) {
-            FileType::Topology
-        } else {
-            FileType::Other
-        };
+        let file_type = classify_extension(&ext, engine_formats);
         let metadata = entry.metadata()?;
         files.push(FileInfo {
             file_name,
@@ -54,12 +63,6 @@ pub fn generate(args: &GenArgs) -> Result<Meta> {
             size: metadata.len(),
         });
     }
-
-    //let tmpl = args
-    //    .template
-    //    .clone()
-    //    .map(|path| Meta::from_file(&path))
-    //    .transpose()?;
 
     let trajectories = match &args.trajectory {
         Some(filename) => vec![filename.clone()],
@@ -92,18 +95,13 @@ pub fn generate(args: &GenArgs) -> Result<Meta> {
 
     let mut meta = Meta::example_minimal();
 
-    //if let Some(filename) = &args.template {
-    //    let tmpl = Meta::from_file(filename)?;
-    //    meta.lead_contributor_orcid = tmpl.lead_contributor_orcid.to_string();
-    //}
-
     meta.trajectory_file_names = trajectories;
 
     meta.structure_file_name = structure;
 
     meta.topology_file_name = topology;
 
-    meta.software_name = "<software_name> (required)".to_string();
+    meta.software_name = args.software.clone();
 
     meta.software_version = "<software_version> (required)".to_string();
 
@@ -119,6 +117,51 @@ pub fn generate(args: &GenArgs) -> Result<Meta> {
     };
 
     Ok(meta)
+}
+
+// --------------------------------------------------
+/// Classifies a file extension as Trajectory/Structure/Topology/Other.
+///
+/// Given `engine_formats` (the declared engine's own row in
+/// ENGINE_FILE_FORMATS), an extension is classified by which *one* of that
+/// engine's three lists it appears in. Some extensions are genuinely
+/// ambiguous even within a single engine -- GROMACS's `.tpr` is valid as
+/// both structure and topology -- so an extension matching more than one
+/// list is `Other` rather than a guess; the submitter must say via
+/// `--structure`/`--topology`/`--trajectory`. Same for zero matches: an
+/// extension this engine doesn't use at all is Other, not assigned anyway.
+///
+/// `engine_formats` is None only for CUSTOM (no fixed convention to check
+/// against), in which case this falls back to "recognized by any engine at
+/// all" -- the same union the check used before `--software` existed.
+fn classify_extension(
+    ext: &str,
+    engine_formats: Option<&EngineFileFormats>,
+) -> FileType {
+    let Some(fmt) = engine_formats else {
+        return if TRAJECTORY_FILE_EXTS.contains(&ext) {
+            FileType::Trajectory
+        } else if STRUCTURE_FILE_EXTS.contains(&ext) {
+            FileType::Structure
+        } else if TOPOLOGY_FILE_EXTS.contains(&ext) {
+            FileType::Topology
+        } else {
+            FileType::Other
+        };
+    };
+
+    let mut matched = [
+        (fmt.trajectory.contains(&ext), FileType::Trajectory),
+        (fmt.structure.contains(&ext), FileType::Structure),
+        (fmt.topology.contains(&ext), FileType::Topology),
+    ]
+    .into_iter()
+    .filter_map(|(is_match, role)| is_match.then_some(role));
+
+    match (matched.next(), matched.next()) {
+        (Some(role), None) => role,
+        _ => FileType::Other,
+    }
 }
 
 // --------------------------------------------------
@@ -153,5 +196,137 @@ fn select_candidate(
                 ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use tempfile::tempdir;
+
+    fn gen_args(software: &str, directory: Option<&Path>) -> GenArgs {
+        GenArgs {
+            software: software.to_string(),
+            directory: directory.map(|d| d.to_string_lossy().to_string()),
+            format: None,
+            outfile: "-".to_string(),
+            trajectory: None,
+            structure: None,
+            topology: None,
+        }
+    }
+
+    // --- classify_extension: unambiguous within a known engine ---
+
+    #[test]
+    fn classify_gromacs_extensions() {
+        let fmt = ENGINE_FILE_FORMATS.get("GROMACS");
+        assert_eq!(classify_extension("xtc", fmt), FileType::Trajectory);
+        assert_eq!(classify_extension("gro", fmt), FileType::Structure);
+        assert_eq!(classify_extension("top", fmt), FileType::Topology);
+    }
+
+    // --- classify_extension: the same extension, different engines ---
+
+    #[test]
+    fn classify_crd_depends_on_engine() {
+        // .crd is AMBER's ASCII trajectory format but CHARMM/NAMD's
+        // structure format -- the same extension means different things
+        // depending on which engine produced the file.
+        assert_eq!(
+            classify_extension("crd", ENGINE_FILE_FORMATS.get("AMBER")),
+            FileType::Trajectory
+        );
+        assert_eq!(
+            classify_extension("crd", ENGINE_FILE_FORMATS.get("CHARMM")),
+            FileType::Structure
+        );
+    }
+
+    #[test]
+    fn classify_gro_depends_on_engine() {
+        // .gro is GROMACS's structure file but SPONGE's topology file.
+        assert_eq!(
+            classify_extension("gro", ENGINE_FILE_FORMATS.get("GROMACS")),
+            FileType::Structure
+        );
+        assert_eq!(
+            classify_extension("gro", ENGINE_FILE_FORMATS.get("SPONGE")),
+            FileType::Topology
+        );
+    }
+
+    // --- classify_extension: ambiguous even within one engine ---
+
+    #[test]
+    fn classify_tpr_is_ambiguous_within_gromacs() {
+        // GROMACS's .tpr is valid as both structure and topology -- don't
+        // guess, the submitter has to say via --structure/--topology.
+        assert_eq!(
+            classify_extension("tpr", ENGINE_FILE_FORMATS.get("GROMACS")),
+            FileType::Other
+        );
+    }
+
+    #[test]
+    fn classify_unrecognized_extension_for_engine_is_other() {
+        // .psf isn't in AMBER's list at all (it's CHARMM/NAMD/ACEMD's).
+        assert_eq!(
+            classify_extension("psf", ENGINE_FILE_FORMATS.get("AMBER")),
+            FileType::Other
+        );
+    }
+
+    // --- classify_extension: CUSTOM falls back to the cross-engine union ---
+
+    #[test]
+    fn classify_custom_falls_back_to_union() {
+        assert!(ENGINE_FILE_FORMATS.get("CUSTOM").is_none());
+        assert_eq!(classify_extension("xtc", None), FileType::Trajectory);
+        assert_eq!(classify_extension("not_a_real_ext", None), FileType::Other);
+    }
+
+    // --- generate(): --software validation ---
+
+    #[test]
+    fn generate_rejects_invalid_software() {
+        let args = gen_args("NOTAREALENGINE", None);
+        let err = generate(&args).unwrap_err();
+        assert!(err.to_string().contains("NOTAREALENGINE"));
+        assert!(err.to_string().contains("choose from"));
+    }
+
+    // --- generate(): end-to-end classification with a real directory ---
+
+    #[test]
+    fn generate_classifies_gromacs_directory() {
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("sim.gro"), b"structure").unwrap();
+        fs::write(dir.path().join("sim.top"), b"topology").unwrap();
+        fs::write(dir.path().join("sim.xtc"), b"trajectory").unwrap();
+
+        let args = gen_args("GROMACS", Some(dir.path()));
+        let meta = generate(&args).unwrap();
+        assert_eq!(meta.software_name, "GROMACS");
+        assert_eq!(meta.structure_file_name, "sim.gro");
+        assert_eq!(meta.topology_file_name, "sim.top");
+        assert_eq!(meta.trajectory_file_names, vec!["sim.xtc".to_string()]);
+    }
+
+    #[test]
+    fn generate_leaves_ambiguous_tpr_unassigned() {
+        // A lone .tpr under GROMACS can't be auto-assigned to either
+        // structure or topology (classify_extension returns Other for it),
+        // so both fall back to the "required" placeholder instead of one
+        // silently winning.
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("run.tpr"), b"topology-or-structure").unwrap();
+        fs::write(dir.path().join("sim.xtc"), b"trajectory").unwrap();
+
+        let args = gen_args("GROMACS", Some(dir.path()));
+        let meta = generate(&args).unwrap();
+        assert!(meta.structure_file_name.contains("required"));
+        assert!(meta.topology_file_name.contains("required"));
     }
 }

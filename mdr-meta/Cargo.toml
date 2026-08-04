@@ -1,6 +1,6 @@
 [package]
 name = "mdr-meta"
-version = "0.3.18"
+version = "0.3.19"
 edition = "2024"
 
 [dependencies]
@@ -15,3 +15,4 @@ strum_macros = "0.28"
 assert_cmd = "2.2.0"
 predicates = "3.1.4"
 pretty_assertions = "1.4.1"
+tempfile = "3"

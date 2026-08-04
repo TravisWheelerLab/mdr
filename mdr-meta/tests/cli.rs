@@ -174,6 +174,45 @@ fn example_json() -> Result<()> {
 }
 
 // --------------------------------------------------
+// tests/inputs/gen/ is a fixture *directory* that `gen` scans, so its
+// expected output can't live inside it -- gen would pick the expected-output
+// file itself up as an additional file. It lives one level up instead, in
+// tests/inputs/ alongside the metadata-file fixtures under INPUT_ROOT (which
+// is a different, libmdrepo-owned directory).
+const GEN_INPUT_ROOT: &str = "tests/inputs/gen";
+const GEN_EXPECTED: &str = "tests/inputs/expected.gen.toml";
+
+#[test]
+fn gen_gromacs() -> Result<()> {
+    let expected = fs::read_to_string(GEN_EXPECTED)?;
+
+    let output = Command::cargo_bin(PRG)?
+        .args(["gen", "-s", "GROMACS", "-d", GEN_INPUT_ROOT])
+        .output()?;
+
+    let stdout = String::from_utf8(output.stdout).expect("invalid UTF-8");
+    assert_eq!(stdout.trim(), expected.trim());
+    assert_eq!(output.status.code(), Some(0));
+
+    Ok(())
+}
+
+// --------------------------------------------------
+// clap validates --software against VALID_SOFTWARE itself (see
+// PossibleValuesParser in types.rs), so an unknown engine never reaches
+// generate() at all -- this is caught before the directory is even read.
+#[test]
+fn gen_rejects_invalid_software() -> Result<()> {
+    Command::cargo_bin(PRG)?
+        .args(["gen", "-s", "NOTAREALENGINE", "-d", GEN_INPUT_ROOT])
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("possible values"));
+
+    Ok(())
+}
+
+// --------------------------------------------------
 #[test]
 fn to_json() -> Result<()> {
     run(RunArgs {

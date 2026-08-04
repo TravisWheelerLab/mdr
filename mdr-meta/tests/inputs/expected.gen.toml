@@ -1,0 +1,27 @@
+lead_contributor_orcid = "0000-0000-0000-0000"
+trajectory_file_names = ["traj.xtc"]
+structure_file_name = "struct.pdb"
+topology_file_name = "topol.top"
+temperature_kelvin = 300
+integration_timestep_fs = 2
+short_description = "<short_description> (required)"
+software_name = "GROMACS"
+software_version = "<software_version> (required)"
+
+[[additional_files]]
+file_name = "add1.txt"
+file_type = "Other"
+
+[[additional_files]]
+file_name = "add2.cpt"
+file_type = "Other"
+
+[[additional_files]]
+file_name = "add2.xyz"
+file_type = "Other"
+
+[[contributors]]
+name = "<Your Name>"
+orcid = "<orcid> (optional)"
+email = "<email> (optional)"
+institution = "<institution> (optional)"
