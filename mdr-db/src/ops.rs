@@ -571,6 +571,33 @@ pub fn insert_pdb(conn: &mut PgConnection, new: NewPdb) -> QueryResult<Pdb> {
         .get_result(conn)
 }
 
+/// Insert the PDB code, or refresh the existing row, in one statement.
+///
+/// Same race as `upsert_uniprot`, same reason: md_pdb rows are shared across
+/// simulations and landing directories are processed in parallel, so two
+/// threads citing the same new code both find nothing and both insert, and
+/// md_pdb has UNIQUE (pdb_id) to turn that into a failed directory. Fixed
+/// alongside the uniprot one on 2026-08-10, before it was ever observed --
+/// ticket 2175 was 16 variants of a single structure, which is exactly the
+/// shape that produced the uniprot collision.
+///
+/// Callers lowercase the code first; that is not done here, so this upserts
+/// on whatever it is given.
+pub fn upsert_pdb(conn: &mut PgConnection, new: NewPdb) -> QueryResult<Pdb> {
+    use diesel::upsert::excluded;
+
+    diesel::insert_into(md_pdb::table)
+        .values(&new)
+        .on_conflict(md_pdb::pdb_id)
+        .do_update()
+        .set((
+            md_pdb::classification.eq(excluded(md_pdb::classification)),
+            md_pdb::title.eq(excluded(md_pdb::title)),
+        ))
+        .returning(Pdb::as_returning())
+        .get_result(conn)
+}
+
 pub fn update_pdb(
     conn: &mut PgConnection,
     rid: i64,

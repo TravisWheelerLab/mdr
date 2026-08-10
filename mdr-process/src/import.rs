@@ -646,31 +646,20 @@ fn upsert_pdb(
 ) -> Result<i64> {
     let code = pdb.pdb_id.to_lowercase();
 
-    let pdb_pk = match ops::find_pdb_id_by_code(conn, &code)? {
-        Some(id) => {
-            ops::update_pdb(
-                conn,
-                id,
-                PdbUpdate {
-                    title: Some(Some(pdb.title.clone())),
-                    classification: Some(Some(pdb.classification.clone())),
-                    ..Default::default()
-                },
-            )?;
-            id
-        }
-        None => {
-            ops::insert_pdb(
-                conn,
-                NewPdb {
-                    pdb_id: code,
-                    classification: Some(pdb.classification.clone()),
-                    title: Some(pdb.title.clone()),
-                },
-            )?
-            .id
-        }
-    };
+    // One statement, not find-then-insert -- see ops::upsert_pdb. Identical
+    // race to the uniprot one: md_pdb is shared across simulations, landings
+    // run in parallel, and UNIQUE (pdb_id) turns the collision into a failed
+    // directory. Both old branches wrote title and classification from the
+    // payload, so behaviour for a code that already exists is unchanged.
+    let pdb_pk = ops::upsert_pdb(
+        conn,
+        NewPdb {
+            pdb_id: code,
+            classification: Some(pdb.classification.clone()),
+            title: Some(pdb.title.clone()),
+        },
+    )?
+    .id;
 
     ops::update_simulation(
         conn,

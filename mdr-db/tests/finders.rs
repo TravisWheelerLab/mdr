@@ -604,6 +604,44 @@ fn upsert_uniprot_is_idempotent_on_the_accession() {
 }
 
 #[test]
+fn upsert_pdb_is_idempotent_on_the_code() {
+    // Same race as upsert_uniprot_is_idempotent_on_the_accession, against
+    // md_pdb's UNIQUE (pdb_id). Fixed before it was observed in the wild.
+    let mut c = conn_or_skip!();
+
+    let first = ops::upsert_pdb(
+        &mut c,
+        NewPdb {
+            pdb_id: "1v4t-upserttest".into(),
+            classification: Some("TRANSFERASE".into()),
+            title: Some("Glucokinase".into()),
+        },
+    )
+    .unwrap();
+
+    let second = ops::upsert_pdb(
+        &mut c,
+        NewPdb {
+            pdb_id: "1v4t-upserttest".into(),
+            classification: Some("TRANSFERASE, refreshed".into()),
+            title: Some("Glucokinase, refreshed".into()),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(first.id, second.id);
+    assert_eq!(
+        ops::find_pdb_id_by_code(&mut c, "1v4t-upserttest").unwrap(),
+        Some(first.id)
+    );
+    assert_eq!(second.title.as_deref(), Some("Glucokinase, refreshed"));
+    assert_eq!(
+        second.classification.as_deref(),
+        Some("TRANSFERASE, refreshed")
+    );
+}
+
+#[test]
 fn find_uniprot_and_pdb_by_their_string_keys() {
     let mut c = conn_or_skip!();
     let sim = seed_sim(&mut c);
