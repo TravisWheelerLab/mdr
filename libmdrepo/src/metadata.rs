@@ -745,14 +745,16 @@ fn format_validation_error(err: &ValidationError) -> String {
 }
 
 // --------------------------------------------------
+/// Reading into a `graph::Builder` rather than a `write::Writer` follower buys
+/// the ring-closure check for free: `read` alone only rejects bad syntax, so a
+/// dangling or unmatched rnum ("c1ccccc", "C1CC") parses happily, while
+/// `build` reconciles the rnums and reports it. Neither checks valence -- a
+/// seven-bond carbon still passes here, as it does in OpenBabel.
 pub fn is_valid_smiles(smiles: &str) -> std::result::Result<(), ValidationError> {
-    let mut writer = purr::write::Writer::new();
-    let mut trace = purr::read::Trace::new();
-    if purr::read::read(smiles, &mut writer, Some(&mut trace)).is_ok() {
-        Ok(())
-    } else {
-        Err(ValidationError::new("invalid_smiles"))
-    }
+    let invalid = || ValidationError::new("invalid_smiles");
+    let mut builder = purr::graph::Builder::new();
+    purr::read::read(smiles, &mut builder, None).map_err(|_| invalid())?;
+    builder.build().map(|_| ()).map_err(|_| invalid())
 }
 
 // --------------------------------------------------
@@ -1336,6 +1338,20 @@ mod tests {
     fn test_is_valid_smiles_invalid() {
         assert!(is_valid_smiles("smiles_string").is_err());
         assert!(is_valid_smiles("not!valid").is_err());
+        assert!(is_valid_smiles("").is_err());
+        assert!(is_valid_smiles("   ").is_err());
+        assert!(is_valid_smiles("CCO junk").is_err());
+    }
+
+    /// Unbalanced ring-closure digits parse as valid SMILES syntax and are only
+    /// caught when the graph is built, so they get their own test.
+    #[test]
+    fn test_is_valid_smiles_rejects_unbalanced_rnum() {
+        assert!(is_valid_smiles("c1ccccc").is_err());
+        assert!(is_valid_smiles("C1CC").is_err());
+        // Balanced rings of both digit forms still pass.
+        assert!(is_valid_smiles("c1ccccc1").is_ok());
+        assert!(is_valid_smiles("C%10CCCCC%10").is_ok());
     }
 
     // --- example() / example_minimal() validity ---
