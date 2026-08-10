@@ -560,6 +560,50 @@ fn find_sim_scoped_children_by_natural_key() {
 }
 
 #[test]
+fn upsert_uniprot_is_idempotent_on_the_accession() {
+    // The regression is ticket 2175 (2026-08-09): two landing directories
+    // processed in parallel both cited P35557, both found nothing, and both
+    // inserted -- the loser died on the unique constraint and failed its whole
+    // directory. A second upsert of the same accession must refresh the row
+    // rather than raise, and must return the same primary key.
+    let mut c = conn_or_skip!();
+
+    let first = ops::upsert_uniprot(
+        &mut c,
+        NewUniprot {
+            uniprot_id: "P35557-upserttest".into(),
+            name: "Glucokinase".into(),
+            amino_length: 4,
+            sequence: "MLDD".into(),
+        },
+    )
+    .unwrap();
+
+    let second = ops::upsert_uniprot(
+        &mut c,
+        NewUniprot {
+            uniprot_id: "P35557-upserttest".into(),
+            name: "Glucokinase, refreshed".into(),
+            amino_length: 6,
+            sequence: "MLDDRA".into(),
+        },
+    )
+    .unwrap();
+
+    // Same row, not a second one...
+    assert_eq!(first.id, second.id);
+    assert_eq!(
+        ops::find_uniprot_id_by_accession(&mut c, "P35557-upserttest").unwrap(),
+        Some(first.id)
+    );
+
+    // ...and the payload won, matching what the old update branch wrote.
+    assert_eq!(second.name, "Glucokinase, refreshed");
+    assert_eq!(second.amino_length, 6);
+    assert_eq!(second.sequence, "MLDDRA");
+}
+
+#[test]
 fn find_uniprot_and_pdb_by_their_string_keys() {
     let mut c = conn_or_skip!();
     let sim = seed_sim(&mut c);

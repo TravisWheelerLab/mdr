@@ -1426,6 +1426,44 @@ pub fn insert_uniprot(
         .get_result(conn)
 }
 
+/// Insert the accession, or refresh the existing row, in one statement.
+///
+/// This exists because find-then-insert races. md_uniprot rows are shared
+/// across simulations, and mdr-process processes landing directories in
+/// parallel, so two threads importing simulations that cite the *same* new
+/// accession both find nothing and both insert. Ticket 2175 died that way on
+/// 2026-08-09: landings _7 and _15 both carried P35557, _7 inserted it, and
+/// _15 failed the whole directory with "duplicate key value violates unique
+/// constraint md_repo_app_uniprot_uniprot_id_key".
+///
+/// It is a first-encounter race -- once the row exists every later thread
+/// takes the update path -- which is exactly why it is easy to miss and why a
+/// batch of one submitter's variants of a single protein is the case that
+/// triggers it.
+///
+/// DO UPDATE rather than DO NOTHING: DO NOTHING returns no row on conflict, so
+/// get_result would fail with NotFound precisely when we lost the race. The
+/// SET list mirrors what the old update branch wrote, so behaviour for an
+/// existing row is unchanged.
+pub fn upsert_uniprot(
+    conn: &mut PgConnection,
+    new: NewUniprot,
+) -> QueryResult<Uniprot> {
+    use diesel::upsert::excluded;
+
+    diesel::insert_into(md_uniprot::table)
+        .values(&new)
+        .on_conflict(md_uniprot::uniprot_id)
+        .do_update()
+        .set((
+            md_uniprot::name.eq(excluded(md_uniprot::name)),
+            md_uniprot::amino_length.eq(excluded(md_uniprot::amino_length)),
+            md_uniprot::sequence.eq(excluded(md_uniprot::sequence)),
+        ))
+        .returning(Uniprot::as_returning())
+        .get_result(conn)
+}
+
 pub fn update_uniprot(
     conn: &mut PgConnection,
     rid: i64,
