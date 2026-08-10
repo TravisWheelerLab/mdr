@@ -1177,6 +1177,45 @@ pub fn insert_software(
         .get_result(conn)
 }
 
+/// Insert the (name, version) pair, or return the existing row, in one
+/// statement.
+///
+/// Third instance of the find-then-insert race fixed on 2026-08-10, after
+/// md_uniprot and md_pdb. This one is the oldest and was the only one that had
+/// already done damage, because md_software had no unique constraint until the
+/// Django migration `0258_simulationsoftware_md_software_name_version_uniq`:
+/// the losing thread did not fail, it silently inserted a second row. AMBER
+/// 2022 existed twice on prod (ids 53 and 54) and split three simulations 2/1;
+/// they were created 138 ms apart in one parallel batch. Merged onto id 53 the
+/// same day.
+///
+/// **This function and that migration must ship together.** Adding the
+/// constraint while callers still find-then-insert converts a silent duplicate
+/// into a failed landing directory; fixing this without the constraint leaves
+/// ON CONFLICT with no unique index to target, which is an error.
+///
+/// The SET is a self-assignment because the table has no columns beyond the
+/// conflict target -- DO UPDATE is still required, since DO NOTHING returns no
+/// row and get_result would fail with NotFound exactly when we lost the race.
+///
+/// Caveat inherited from the constraint: a NULL version does not conflict in
+/// Postgres, so two (name, NULL) rows can still both insert. Neither database
+/// holds a null or blank version today. See the model's Meta for the rest.
+pub fn upsert_software(
+    conn: &mut PgConnection,
+    new: NewSoftware,
+) -> QueryResult<Software> {
+    use diesel::upsert::excluded;
+
+    diesel::insert_into(md_software::table)
+        .values(&new)
+        .on_conflict((md_software::name, md_software::version))
+        .do_update()
+        .set(md_software::name.eq(excluded(md_software::name)))
+        .returning(Software::as_returning())
+        .get_result(conn)
+}
+
 pub fn update_software(
     conn: &mut PgConnection,
     rid: i64,

@@ -604,6 +604,46 @@ fn upsert_uniprot_is_idempotent_on_the_accession() {
 }
 
 #[test]
+fn upsert_software_is_idempotent_on_name_and_version() {
+    // The one that had already done damage: md_software had no unique
+    // constraint, so the losing thread inserted a duplicate silently rather
+    // than failing. AMBER/2022 existed twice on prod. Depends on the constraint
+    // added in Django migration 0258, mirrored into tests/fixtures/schema.sql.
+    let mut c = conn_or_skip!();
+
+    let first = ops::upsert_software(
+        &mut c,
+        NewSoftware {
+            name: "AMBER-upserttest".into(),
+            version: Some("2022".into()),
+        },
+    )
+    .unwrap();
+
+    let second = ops::upsert_software(
+        &mut c,
+        NewSoftware {
+            name: "AMBER-upserttest".into(),
+            version: Some("2022".into()),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(first.id, second.id);
+
+    // A different version is a different row, not a conflict.
+    let other = ops::upsert_software(
+        &mut c,
+        NewSoftware {
+            name: "AMBER-upserttest".into(),
+            version: Some("2023".into()),
+        },
+    )
+    .unwrap();
+    assert_ne!(first.id, other.id);
+}
+
+#[test]
 fn upsert_pdb_is_idempotent_on_the_code() {
     // Same race as upsert_uniprot_is_idempotent_on_the_accession, against
     // md_pdb's UNIQUE (pdb_id). Fixed before it was observed in the wild.

@@ -273,13 +273,12 @@ fn find_or_create_software(
     sim: &ExportSimulation,
 ) -> Result<i64> {
     let version = Some(sim.software_version.as_str());
-    if let Some(id) =
-        ops::find_software_id_by_name_version(conn, &sim.software_name, version)?
-    {
-        return Ok(id);
-    }
 
-    Ok(ops::insert_software(
+    // One statement, not find-then-insert -- see ops::upsert_software. This is
+    // the race that had already fired: with no unique constraint on
+    // md_software the loser used to insert a duplicate silently. The
+    // constraint arrived in Django migration 0258, which this depends on.
+    Ok(ops::upsert_software(
         conn,
         NewSoftware {
             name: sim.software_name.clone(),

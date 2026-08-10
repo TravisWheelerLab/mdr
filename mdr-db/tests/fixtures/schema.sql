@@ -2353,6 +2353,14 @@ ALTER TABLE ONLY public.md_uniprot
 
 
 --
+-- Name: md_software md_software_name_version_uniq; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.md_software
+    ADD CONSTRAINT md_software_name_version_uniq UNIQUE (name, version);
+
+
+--
 -- Name: md_uniprot md_repo_app_uniprot_uniprot_id_key; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
