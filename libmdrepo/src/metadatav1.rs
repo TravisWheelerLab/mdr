@@ -303,6 +303,10 @@ impl MetaV1 {
             topology_file_name: reqd.topology_file_name.clone(),
             temperature_kelvin,
             integration_timestep_fs,
+            // v1 had no notion of output frequency: `timestep_information`
+            // carries only the integration timestep, so there is nothing to
+            // migrate and nothing to invent.
+            sampling_frequency_ps: None,
             short_description: self
                 .initial
                 .short_description
