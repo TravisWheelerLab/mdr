@@ -93,6 +93,7 @@ fn seed_sim(c: &mut PgConnection) -> i64 {
             water_density: None,
             duration: None,
             sampling_frequency: None,
+            sampling_frequency_ps: None,
             integration_timestep_fs: None,
             creation_date: Utc::now(),
             software_id: None,

@@ -454,6 +454,11 @@ pub fn process_trajectory(args: ProcessTrajectoryArgs) -> Result<ProcessedTrajec
     ]
     .map(|filename| trajectory_dir.join(filename));
 
+    // None unless this run actually converted the trajectory: the arm below
+    // that finds the outputs already present never reads the source, so it
+    // cannot know, and must not claim to.
+    let mut source_has_time_axis: Option<bool> = None;
+
     if full_min_files.iter().all(|f| file_exists(f)) {
         debug!(
             r#"Full/minimal files all exist for "{}""#,
@@ -583,6 +588,12 @@ pub fn process_trajectory(args: ProcessTrajectoryArgs) -> Result<ProcessedTrajec
                 String::from_utf8_lossy(&output.stderr),
             );
         }
+
+        // The wrapper reports what the SOURCE trajectory held, before this
+        // conversion rewrote its timing. Read it here or not at all.
+        source_has_time_axis =
+            parse_time_axis_marker(&String::from_utf8_lossy(&output.stdout));
+        debug!("Source time axis: {source_has_time_axis:?}");
     }
 
     let full_gro = trajectory_dir.join("full.gro");
@@ -631,6 +642,7 @@ pub fn process_trajectory(args: ProcessTrajectoryArgs) -> Result<ProcessedTrajec
         trajectory_file_stem,
         directory_name: trajectory_dir.to_string_lossy().to_string(),
         is_coarse_grained,
+        source_has_time_axis,
     })
 }
 
@@ -1063,6 +1075,7 @@ pub fn make_import_json(
         args.all_trajectories,
         &args.example_trajectory.full_xtc,
         args.meta.integration_timestep_fs,
+        args.meta.sampling_frequency_ps,
         args.processed_dir,
     )?;
 
@@ -1150,6 +1163,7 @@ pub fn make_import_json(
         uniprots,
         duration: duration.totaltime_ns,
         sampling_frequency: duration.sampling_frequency_ns,
+        sampling_frequency_ps: args.meta.sampling_frequency_ps,
         integration_timestep_fs: args.meta.integration_timestep_fs,
         external_links: args.meta.external_links.unwrap_or_default(),
         forcefield: args.meta.forcefield,
@@ -1602,10 +1616,30 @@ pub fn get_inferred_ligands(
 }
 
 // --------------------------------------------------
+/// Read the wrapper's `[mdrepo] source_has_time_axis=` line
+///
+/// Returns None when the marker is absent or unrecognised, which is the same
+/// thing the wrapper means by "unknown": we could not establish that the
+/// source lacked a time axis, so nothing downstream may act as though we had.
+fn parse_time_axis_marker(stdout: &str) -> Option<bool> {
+    const MARKER: &str = "[mdrepo] source_has_time_axis=";
+    stdout
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix(MARKER))
+        .and_then(|value| match value.trim() {
+            "true" => Some(true),
+            "false" => Some(false),
+            _ => None,
+        })
+}
+
+// --------------------------------------------------
 pub fn get_duration(
     trajectories: &[ProcessedTrajectory],
     example_full_xtc: &Path,
     integration_timestep_fs: u32,
+    declared_sampling_ps: Option<f64>,
     processed_dir: &Path,
 ) -> Result<Duration> {
     let out_file = processed_dir.join("duration.json");
@@ -1623,8 +1657,50 @@ pub fn get_duration(
         let mut total_duration_ps = 0.0;
         let mut sampling_frequency_ns = 0.0_f32;
         for traj in trajectories {
-            let (duration_ps, sampling_ns) =
+            let (measured_ps, measured_ns, num_frames) =
                 measure_trajectory(&traj.full_xtc, integration_timestep_fs)?;
+
+            // What was measured is only trustworthy if the source had a time
+            // axis to begin with. When it did not, conversion stamped
+            // cpptraj's default 1 ps/frame onto full.xtc and `measured_ns` is
+            // that default wearing the costume of a measurement -- which is
+            // exactly how MDR00048669 came to record 0.001 ns/frame and a
+            // 5.61 ns duration, both a clean factor of ten too small, and sit
+            // in the public record for a year looking authoritative.
+            let (duration_ps, sampling_ns) = match traj.source_has_time_axis {
+                Some(false) => {
+                    let declared = declared_sampling_ps.ok_or_else(|| {
+                        anyhow!(
+                            "{}: the source trajectory carries no time axis \
+                             and the metadata declares no \
+                             `sampling_frequency_ps`, so the frame spacing \
+                             cannot be established. Converting anyway would \
+                             record cpptraj's default of 1 ps per frame as \
+                             though it had been measured. Add \
+                             `sampling_frequency_ps` to mdrepo-metadata.toml \
+                             (the output frequency times the integration \
+                             timestep) and re-run.",
+                            traj.trajectory_file_name
+                        )
+                    })?;
+
+                    // Spacing between frames, so the span is one interval
+                    // fewer than the frame count.
+                    let derived_ps = declared * (num_frames - 1.);
+                    debug!(
+                        "{}: no source time axis; using declared \
+                         {declared} ps/frame over {num_frames} frames",
+                        traj.trajectory_file_name
+                    );
+                    (derived_ps, round_dp(declared / PS_PER_NS, 3) as f32)
+                }
+                // True, or unknown. Unknown keeps today's behaviour on
+                // purpose: it means the report could not be read, not that
+                // the axis is absent, and failing on that would condemn
+                // directories over a parsing gap.
+                _ => (measured_ps, measured_ns),
+            };
+
             total_duration_ps += duration_ps;
             if traj.full_xtc == example_full_xtc {
                 sampling_frequency_ns = sampling_ns;
@@ -1664,7 +1740,7 @@ pub fn get_duration(
 fn measure_trajectory(
     full_xtc: &Path,
     integration_timestep_fs: u32,
-) -> Result<(f64, f32)> {
+) -> Result<(f64, f32, f64)> {
     let mut cmd = Command::new("molly");
     cmd.args(["--info", full_xtc.to_string_lossy().as_ref()]);
     debug!("Running {cmd:?}");
@@ -1765,7 +1841,7 @@ fn measure_trajectory(
     let sampling_frequency_ns =
         round_dp((duration_ps / PS_PER_NS) / (num_frames - 1.), 3) as f32;
 
-    Ok((duration_ps, sampling_frequency_ns))
+    Ok((duration_ps, sampling_frequency_ns, num_frames))
 }
 
 // --------------------------------------------------

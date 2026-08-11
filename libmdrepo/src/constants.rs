@@ -27,6 +27,13 @@ pub const TEMP_K_MIN: u32 = 275;
 pub const TEMP_K_MAX: u32 = 700;
 pub const TIMESTEP_FS_MIN: u32 = 1;
 pub const TIMESTEP_FS_MAX: u32 = 20;
+// Frame spacing, not integration timestep: the simulated time between saved
+// frames. The floor is one femtosecond (saving every step of the finest
+// timestep anyone declares) and the ceiling 100 ns per frame, well past any
+// real sampling rate. These bounds only catch nonsense; they cannot catch a
+// unit error, since a value entered in ns or fs still lands inside them.
+pub const SAMPLING_FREQUENCY_PS_MIN: f64 = 0.001;
+pub const SAMPLING_FREQUENCY_PS_MAX: f64 = 100_000.;
 pub const VALID_WATER_MODEL: &[&str] = &[
     "AMOEBA",
     "BF",

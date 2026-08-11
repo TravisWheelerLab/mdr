@@ -443,6 +443,11 @@ pub struct Simulation {
     pub water_density: Option<f64>,
     pub duration: Option<f64>,
     pub sampling_frequency: Option<f64>,
+    /// The submitter's DECLARED frame spacing, in picoseconds. Distinct from
+    /// `sampling_frequency` above, which is in nanoseconds and is measured
+    /// from the converted trajectory: this is what was asserted, that is what
+    /// was observed.
+    pub sampling_frequency_ps: Option<f64>,
     pub creation_date: DateTime<Utc>,
     pub software_id: Option<i64>,
     pub md_repo_ticket_id: Option<i64>,
@@ -480,6 +485,7 @@ pub struct NewSimulation {
     pub water_density: Option<f64>,
     pub duration: Option<f64>,
     pub sampling_frequency: Option<f64>,
+    pub sampling_frequency_ps: Option<f64>,
     pub integration_timestep_fs: Option<i32>,
     pub creation_date: DateTime<Utc>,
     pub software_id: Option<i64>,
@@ -515,6 +521,7 @@ pub struct SimulationUpdate {
     pub water_density: Option<Option<f64>>,
     pub duration: Option<Option<f64>>,
     pub sampling_frequency: Option<Option<f64>>,
+    pub sampling_frequency_ps: Option<Option<f64>>,
     pub integration_timestep_fs: Option<Option<i32>>,
     pub software_id: Option<Option<i64>>,
     pub created_by_id: Option<Option<i64>>,

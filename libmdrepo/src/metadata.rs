@@ -31,6 +31,23 @@ pub struct Meta {
     )]
     pub integration_timestep_fs: u32,
 
+    /// Simulated time between consecutive saved frames, in picoseconds --
+    /// the output frequency (AMBER's `ntwx`, GROMACS's `nstxout`) times the
+    /// integration timestep. Optional, and a fallback rather than an
+    /// authority: a trajectory that carries its own time axis is ground
+    /// truth and this is ignored. It exists for the trajectories that
+    /// cannot say it themselves -- an AMBER NetCDF written without a `time`
+    /// variable, or an ASCII mdcrd, which stores no timing at all. Absent
+    /// both, conversion to XTC stamps cpptraj's default 1 ps/frame onto the
+    /// output and every duration and sampling frequency downstream inherits
+    /// that silently.
+    #[validate(range(
+        min = constants::SAMPLING_FREQUENCY_PS_MIN,
+        max = constants::SAMPLING_FREQUENCY_PS_MAX
+    ))]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampling_frequency_ps: Option<f64>,
+
     #[validate(length(max = 300), regex(path = *constants::NOT_WHITESPACE_REGEX))]
     pub short_description: String,
 
@@ -181,6 +198,29 @@ impl Meta {
                 self.software_name,
                 valid_software_names.join(", "),
             ))
+        }
+
+        // A frame cannot be saved more often than the integrator steps, so a
+        // declared spacing shorter than one timestep is a mistake -- most
+        // likely a value entered in the wrong unit. Both fields must have
+        // passed their own range checks first, so one bad number is reported
+        // once rather than twice.
+        if let Some(sampling_ps) = self.sampling_frequency_ps
+            && (constants::SAMPLING_FREQUENCY_PS_MIN
+                ..=constants::SAMPLING_FREQUENCY_PS_MAX)
+                .contains(&sampling_ps)
+            && (constants::TIMESTEP_FS_MIN..=constants::TIMESTEP_FS_MAX)
+                .contains(&self.integration_timestep_fs)
+        {
+            let timestep_ps = f64::from(self.integration_timestep_fs) / 1000.;
+            if sampling_ps < timestep_ps {
+                messages.push(format!(
+                    "sampling_frequency_ps: {sampling_ps} ps is shorter than \
+                    the {} fs integration timestep -- a frame cannot be saved \
+                    more often than every step",
+                    self.integration_timestep_fs
+                ));
+            }
         }
 
         // Each of structure/topology/trajectory needs *an* extension to be
@@ -414,6 +454,7 @@ impl Meta {
             topology_file_name: "topology.tpr".to_string(),
             temperature_kelvin: 300,
             integration_timestep_fs: 2,
+            sampling_frequency_ps: Some(10.),
             short_description: "<short_description> (required)".to_string(),
             description: Some("<longer description>".to_string()),
             software_name: "GROMACS".to_string(),
@@ -478,6 +519,7 @@ impl Meta {
             topology_file_name: "topology.tpr".to_string(),
             temperature_kelvin: 300,
             integration_timestep_fs: 2,
+            sampling_frequency_ps: None,
             short_description: "<short_description> (required)".to_string(),
             description: None,
             software_name: "GROMACS".to_string(),

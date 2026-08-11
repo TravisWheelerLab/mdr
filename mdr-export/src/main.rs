@@ -283,6 +283,15 @@ fn get_sim(conn: &mut PgConnection, sim_id: i64) -> Result<metadata::Meta> {
             .integration_timestep_fs
             .ok_or_else(|| anyhow!("simulation has no integration timestep"))?
             as u32,
+        // The DECLARED value, and it must never be sim.sampling_frequency.
+        // That column is the *measured* one, derived from the converted XTC
+        // and stored in nanoseconds; mapping it here would make every exported
+        // record assert a declaration no submitter made -- and for exactly the
+        // records this field exists to rescue it would assert the fabricated
+        // 1 ps/frame cpptraj stamps on, which would then pass the ingest check
+        // this field feeds. Null for almost every simulation, which is right:
+        // a trajectory carrying its own time axis needs no declaration.
+        sampling_frequency_ps: sim.sampling_frequency_ps,
         short_description: sim.short_description,
         software_name: software.name,
         software_version: software.version.unwrap_or_default(),

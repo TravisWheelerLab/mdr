@@ -1418,6 +1418,7 @@ CREATE TABLE public.md_simulation (
     water_density double precision,
     duration double precision,
     sampling_frequency double precision,
+    sampling_frequency_ps double precision,
     creation_date timestamp with time zone NOT NULL,
     software_id bigint,
     md_repo_ticket_id bigint,

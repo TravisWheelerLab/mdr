@@ -280,6 +280,16 @@ pub struct ProcessedTrajectory {
     pub trajectory_file_name: String,
     pub trajectory_file_stem: String,
     pub directory_name: String,
+
+    /// Whether the SOURCE trajectory carried a time axis, as reported by
+    /// cpptraj before conversion. `None` means unknown -- either the report
+    /// could not be parsed, or the converted files already existed and the
+    /// conversion was skipped, so nothing read the source this run.
+    ///
+    /// This cannot be recovered later: converting to XTC stamps cpptraj's
+    /// default 1 ps/frame onto the output, so by the time anything measures
+    /// full.xtc a fabricated spacing is indistinguishable from a real one.
+    pub source_has_time_axis: Option<bool>,
     pub is_coarse_grained: bool,
 }
 
@@ -477,6 +487,14 @@ pub struct ExportSimulation {
     pub duration: f64,
 
     pub sampling_frequency: f32,
+
+    /// The submitter's DECLARED frame spacing in picoseconds, straight from
+    /// the TOML. Distinct from `sampling_frequency` above, which is measured
+    /// from the converted trajectory and is in nanoseconds. Absent for almost
+    /// every simulation, which is correct: a trajectory carrying its own time
+    /// axis needs no declaration and this stays None.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sampling_frequency_ps: Option<f64>,
 
     pub integration_timestep_fs: u32,
 

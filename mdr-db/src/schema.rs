@@ -134,6 +134,7 @@ diesel::table! {
         water_density -> Nullable<Float8>,
         duration -> Nullable<Float8>,
         sampling_frequency -> Nullable<Float8>,
+        sampling_frequency_ps -> Nullable<Float8>,
         creation_date -> Timestamptz,
         software_id -> Nullable<Int8>,
         md_repo_ticket_id -> Nullable<Int8>,
