@@ -879,6 +879,10 @@ pub struct UploadInstance {
     pub filenames: Option<String>,
     pub ticket_id: Option<i64>,
     pub landing_id: Option<String>,
+    /// An administrator's record that this landing will never be reprocessed.
+    /// Read here, never written: NewUploadInstance deliberately omits it so
+    /// Postgres supplies false, which is what the column's db_default is for.
+    pub is_abandoned: bool,
 }
 
 #[derive(Debug, Insertable, Deserialize)]

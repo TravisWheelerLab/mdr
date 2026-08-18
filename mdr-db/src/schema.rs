@@ -266,6 +266,7 @@ diesel::table! {
         filenames -> Nullable<Text>,
         ticket_id -> Nullable<Int8>,
         landing_id -> Nullable<Text>,
+        is_abandoned -> Bool,
     }
 }
 

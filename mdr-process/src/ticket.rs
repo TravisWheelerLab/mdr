@@ -440,23 +440,38 @@ fn process_landing(
                     &ctx.orcid,
                     &filenames,
                 ) {
-                    Ok((upload_id, done)) => {
+                    Ok((upload_id, skip)) => {
                         // Nothing has been done to this landing yet, so this
                         // is the cheapest possible place to notice there is
                         // nothing to do. Skipping keeps the landing counted as
                         // a success, which is what lets a repair run finish
                         // clean and finally set processing_complete.
-                        if done && !args.force {
-                            log_message(
-                                &mut conn,
-                                upload_id,
-                                "Skipped: already processed successfully \
-                                 (--force to reprocess)",
-                                false,
-                                false,
-                            );
-                            debug!(r#"Skipping "{landing_id}": already processed"#);
-                            return Ok(());
+                        match skip.filter(|_| !args.force) {
+                            Some(Skip::Done) => {
+                                log_message(
+                                    &mut conn,
+                                    upload_id,
+                                    "Skipped: already processed successfully \
+                                     (--force to reprocess)",
+                                    false,
+                                    false,
+                                );
+                                debug!(r#"Skipping "{landing_id}": already processed"#);
+                                return Ok(());
+                            }
+                            Some(Skip::Abandoned) => {
+                                log_message(
+                                    &mut conn,
+                                    upload_id,
+                                    "Skipped: landing is marked abandoned \
+                                     (--force to reprocess)",
+                                    false,
+                                    false,
+                                );
+                                debug!(r#"Skipping "{landing_id}": abandoned"#);
+                                return Ok(());
+                            }
+                            None => {}
                         }
 
                         log_message(
@@ -609,8 +624,20 @@ fn process_landing(
 
 // --------------------------------------------------
 /// Upsert the upload instance for `(ticket_id, landing_id)`; returns its id.
-/// Returns the upload instance's id, and whether this landing has already been
-/// processed successfully.
+/// Why `process_landing` may decline to do any work on a landing.
+///
+/// Kept apart rather than collapsed into one boolean because they are not the
+/// same claim. `Done` says the work was completed and verified; `Abandoned`
+/// says a person decided it never will be. Both mean "do not process", and
+/// both count as success for `all_ok`, but only one of them is evidence.
+#[derive(Debug, Clone, Copy)]
+enum Skip {
+    Done,
+    Abandoned,
+}
+
+/// Returns the upload instance's id, and why this landing should be skipped,
+/// if it should.
 ///
 /// "Already done" needs two independent signals agreeing, the same pair the
 /// landing purge uses to decide a landing is safe to delete:
@@ -622,6 +649,16 @@ fn process_landing(
 ///
 /// A landing with no instance, no simulation, or a placeholder simulation is
 /// not done, which is the safe direction: it processes exactly as before.
+///
+/// `is_abandoned` short-circuits all of that. An abandoned landing is one an
+/// administrator has recorded as never to be reprocessed -- the submitter is
+/// not resending it, or it has been superseded -- so running it again buys a
+/// failure we already know about. emme's 122 are the case in point: without
+/// this, re-enqueueing any of her twenty tickets reprocesses landings whose
+/// trajectories were confirmed unusable on 08-11, fails on them exactly as
+/// before, and leaves the ticket unable to complete. `Done` is reported ahead
+/// of it where both hold, since a landing that actually succeeded should say
+/// so.
 fn ensure_upload_instance(
     conn: &mut PgConnection,
     ticket_id: i64,
@@ -629,7 +666,7 @@ fn ensure_upload_instance(
     user_id: i64,
     orcid: &str,
     filenames: &str,
-) -> Result<(i64, bool)> {
+) -> Result<(i64, Option<Skip>)> {
     let (_, existing) = ops::list_upload_instances(
         conn,
         None,
@@ -652,7 +689,15 @@ fn ensure_upload_instance(
                 None => false,
             };
 
-        return Ok((instance.id, done));
+        let skip = if done {
+            Some(Skip::Done)
+        } else if instance.is_abandoned {
+            Some(Skip::Abandoned)
+        } else {
+            None
+        };
+
+        return Ok((instance.id, skip));
     }
 
     let instance = ops::insert_upload_instance(
@@ -668,7 +713,7 @@ fn ensure_upload_instance(
             landing_id: Some(landing_id.to_string()),
         },
     )?;
-    Ok((instance.id, false))
+    Ok((instance.id, None))
 }
 
 // --------------------------------------------------
