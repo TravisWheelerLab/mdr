@@ -14,7 +14,6 @@ use anyhow::{Result, anyhow, bail};
 use dotenvy::dotenv;
 use libmdrepo::{
     common::{file_exists, get_md5, read_file},
-    constants::{MOLLY_NFRAMES_REGEX, MOLLY_TIME_REGEX},
     metadata::{self, Meta, MetaCheckOptions},
 };
 use log::debug;
@@ -22,7 +21,7 @@ use rayon::prelude::*;
 use regex::Regex;
 use sha1::{Digest, Sha1};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     env,
     fs::{self, File},
     io::{BufRead, BufReader, Write},
@@ -1734,15 +1733,26 @@ pub fn get_duration(
     Ok(duration)
 }
 
-/// Measure one trajectory with `molly --info`, returning
-/// (duration_ps, sampling_frequency_ns). Includes the 1000x inflated-timestamp
-/// correction used historically.
-fn measure_trajectory(
-    full_xtc: &Path,
-    integration_timestep_fs: u32,
-) -> Result<(f64, f32, f64)> {
+/// How many significant digits a frame-time gap keeps before it is counted.
+/// Finer than any tolerance a caller compares against, coarse enough to absorb
+/// f32 jitter in the stamps themselves.
+const GAP_SIGNIFICANT_DIGITS: i32 = 4;
+
+/// `molly --times` is a filtering mode and insists on an output path. The
+/// filtered trajectory is not wanted, only the times it prints on the way.
+const MOLLY_TIMES_SINK: &str = "/dev/null";
+
+/// Every frame time (ps) of a trajectory, in file order, via `molly --times`.
+///
+/// `molly --info` reports only the first and last time, which is not enough --
+/// see [`modal_gap_ps`] for why the whole series is needed.
+fn frame_times(full_xtc: &Path) -> Result<Vec<f64>> {
     let mut cmd = Command::new("molly");
-    cmd.args(["--info", full_xtc.to_string_lossy().as_ref()]);
+    cmd.args([
+        "--times",
+        full_xtc.to_string_lossy().as_ref(),
+        MOLLY_TIMES_SINK,
+    ]);
     debug!("Running {cmd:?}");
     let output = cmd.output()?;
 
@@ -1753,55 +1763,100 @@ fn measure_trajectory(
         );
     }
 
-    let stdout = str::from_utf8(&output.stdout)?.to_string();
-    let mut time_start: Option<u64> = None;
-    let mut time_stop: Option<u64> = None;
-    let mut num_frames: Option<u64> = None;
+    parse_frame_times(str::from_utf8(&output.stdout)?, full_xtc)
+}
+
+/// Parse `molly --times` output: one frame time in ps per line.
+///
+/// molly writes a tab-separated row and leaves the `--steps` column out when it
+/// was not asked for, so every line carries a trailing tab.
+fn parse_frame_times(stdout: &str, full_xtc: &Path) -> Result<Vec<f64>> {
+    let mut times = Vec::new();
     for line in stdout.lines() {
-        if let Some(caps) = MOLLY_TIME_REGEX.captures(line) {
-            let start = caps
-                .get(1)
-                .ok_or_else(|| anyhow!("Missing time start in: {line}"))?
-                .as_str();
-            let stop = caps
-                .get(2)
-                .ok_or_else(|| anyhow!("Missing time stop in: {line}"))?
-                .as_str();
-
-            if let Ok(tmp) = start.parse::<u64>() {
-                time_start = Some(tmp);
-            } else {
-                debug!(r#"Failed to parse time_start from "{start}" ({line})"#)
-            }
-
-            if let Ok(tmp) = stop.parse::<u64>() {
-                time_stop = Some(tmp);
-            } else if let Ok(tmp) = stop.parse::<f64>() {
-                time_stop = format!("{}", tmp.round()).parse::<u64>().ok();
-            } else {
-                debug!(r#"Failed to parse time_start from "{stop}" ({line})"#)
-            }
-        } else if let Some(caps) = MOLLY_NFRAMES_REGEX.captures(line) {
-            let val = caps
-                .get(1)
-                .ok_or_else(|| anyhow!("Missing nframes value in: {line}"))?
-                .as_str();
-            if let Ok(tmp) = val.parse::<u64>() {
-                num_frames = Some(tmp);
-            } else {
-                debug!(r#"Failed to parse num_frames from "{val}" ({line})"#)
-            }
+        let field = line.split('\t').next().unwrap_or_default().trim();
+        if field.is_empty() {
+            continue;
         }
+        times.push(field.parse::<f64>().map_err(|e| {
+            anyhow!(
+                "Failed to parse frame time {field:?} for \"{}\": {e}",
+                full_xtc.display()
+            )
+        })?);
+    }
+    Ok(times)
+}
+
+/// Bucket a gap by its leading [`GAP_SIGNIFICANT_DIGITS`] digits, as
+/// (exponent, mantissa) so the key is exact integer arithmetic rather than
+/// float equality.
+fn gap_bucket(gap: f64) -> (i32, i64) {
+    let mut exp = gap.log10().floor() as i32;
+    let mut mantissa =
+        (gap / 10f64.powi(exp - (GAP_SIGNIFICANT_DIGITS - 1))).round() as i64;
+    // Rounding can carry the mantissa past its width (9999.6 -> 10000), which
+    // would otherwise drop two all-but-identical gaps into separate buckets on
+    // either side of a power of ten.
+    if mantissa >= 10i64.pow(GAP_SIGNIFICANT_DIGITS as u32) {
+        mantissa /= 10;
+        exp += 1;
+    }
+    (exp, mantissa)
+}
+
+/// The most common positive gap between consecutive frame times, in ps.
+///
+/// Deliberately the mode, and deliberately not `(last - first) / (n - 1)`: some
+/// releases ship trajectories that are concatenations of several shorter
+/// segments, and the frame clock restarts at each boundary. Spanning
+/// first..last then measures whichever segment happens to end the file instead
+/// of the run. BioEmu's ONE-cath1 `cath1_1b43A02/run006_protein.cmprsd.xtc`
+/// holds 501 frames 10000 ps apart and reports `time: 0-30000 ps`, understating
+/// that file by two orders of magnitude and its 25-trajectory bundle by 39%.
+/// Taking the mode over consecutive gaps and ignoring the non-positive ones
+/// drops the boundaries on the floor and recovers the spacing that actually
+/// holds inside a segment.
+///
+/// Gaps are bucketed before counting because xtc frame times are f32: at
+/// multi-microsecond timestamps two nominally equal gaps can differ by a
+/// fraction of a ps (the ULP at t = 2 us is 0.125), and that jitter would
+/// otherwise split one spacing across neighbouring buckets. The median of the
+/// winning bucket is returned, so the result is a gap the file really contains
+/// rather than a rounded stand-in.
+///
+/// Returns `None` when no pair of frames is ordered in time, which for a
+/// trajectory of two frames or more means the stamps are unusable.
+fn modal_gap_ps(times: &[f64]) -> Option<f64> {
+    // Insertion-ordered, so equally populated buckets resolve to the spacing
+    // seen first rather than to whatever the hasher happens to surface.
+    let mut order: Vec<Vec<f64>> = Vec::new();
+    let mut seen: HashMap<(i32, i64), usize> = HashMap::new();
+    for pair in times.windows(2) {
+        let gap = pair[1] - pair[0];
+        if gap <= 0. {
+            continue; // a segment boundary, not a sampling interval
+        }
+        let slot = *seen.entry(gap_bucket(gap)).or_insert_with(|| {
+            order.push(Vec::new());
+            order.len() - 1
+        });
+        order[slot].push(gap);
     }
 
-    let (time_start, time_stop, num_frames) = match (time_start, time_stop, num_frames)
-    {
-        (Some(a), Some(b), Some(c)) => (a as f64, b as f64, c as f64),
-        _ => bail!(
-            "Failed to parse molly output for \"{}\":\n{stdout}",
-            full_xtc.display()
-        ),
-    };
+    let mut winner = order.into_iter().max_by_key(|gaps| gaps.len())?;
+    winner.sort_by(f64::total_cmp);
+    Some(winner[winner.len() / 2])
+}
+
+/// Measure one trajectory with `molly --times`, returning
+/// (duration_ps, sampling_frequency_ns, num_frames). Includes the 1000x
+/// inflated-timestamp correction used historically.
+fn measure_trajectory(
+    full_xtc: &Path,
+    integration_timestep_fs: u32,
+) -> Result<(f64, f32, f64)> {
+    let times = frame_times(full_xtc)?;
+    let num_frames = times.len() as f64;
 
     if num_frames <= 1. {
         bail!(
@@ -1810,9 +1865,17 @@ fn measure_trajectory(
         );
     }
 
-    // time_start/time_stop are in ps from molly
-    let mut duration_ps = time_stop - time_start;
-    let sampling_ps = duration_ps / (num_frames - 1.0);
+    // The spacing is measured, then the span is derived from it, rather than
+    // the other way round: a trajectory built by concatenating segments has no
+    // single span to measure, but every segment shares one spacing.
+    let sampling_ps = modal_gap_ps(&times).ok_or_else(|| {
+        anyhow!(
+            "Trajectory file \"{}\" has {num_frames} frames but no pair of \
+             them advances in time, so the frame spacing cannot be measured",
+            full_xtc.display()
+        )
+    })?;
+    let mut duration_ps = (num_frames - 1.) * sampling_ps;
 
     // Sanity check: compute nstxout (output steps per frame)
     // using the integration timestep from metadata.
@@ -2090,6 +2153,91 @@ mod tests {
         let h1 = get_file_hash(f.path()).unwrap();
         let h2 = get_file_hash(f.path()).unwrap();
         assert_eq!(h1, h2);
+    }
+
+    // A well-behaved trajectory: the mode is the only gap there is, so the
+    // spacing (and therefore the duration) is unchanged from what
+    // (last - first) / (n - 1) used to give.
+    #[test]
+    fn modal_gap_of_an_evenly_spaced_trajectory_is_the_spacing() {
+        let times: Vec<f64> = (0..201).map(|i| i as f64 * 10000.).collect();
+        assert_eq!(modal_gap_ps(&times), Some(10000.));
+        // (n - 1) * spacing reproduces the span exactly.
+        assert_eq!(200. * modal_gap_ps(&times).unwrap(), 2_000_000.);
+    }
+
+    // The bug this function exists for. Shape taken from BioEmu ONE-cath1
+    // cath1_1b43A02/run006_protein.cmprsd.xtc: 501 frames 10000 ps apart in
+    // four concatenated segments, whose last one ends at 30000 ps. molly --info
+    // reports `time: 0-30000 ps`, so the old span-based reading called this
+    // 30000 ps -- 0.6% of the truth.
+    #[test]
+    fn modal_gap_survives_a_clock_that_restarts_mid_file() {
+        let mut times = Vec::new();
+        for len in [201, 7, 290, 3] {
+            let first = if times.is_empty() { 0 } else { 1 };
+            times.extend((first..first + len).map(|i| i as f64 * 10000.));
+        }
+        assert_eq!(times.len(), 501);
+        assert_eq!(*times.last().unwrap(), 30000.);
+
+        assert_eq!(modal_gap_ps(&times), Some(10000.));
+        let duration_ps = (times.len() as f64 - 1.) * modal_gap_ps(&times).unwrap();
+        assert_eq!(duration_ps, 5_000_000.);
+        // What the span would have said, for the record.
+        assert_eq!(times.last().unwrap() - times[0], 30000.);
+    }
+
+    // f32 stamps at multi-microsecond times jitter in the low bits. All of
+    // these are the same 10000 ps spacing and must not split the mode.
+    #[test]
+    fn modal_gap_absorbs_f32_jitter_in_the_stamps() {
+        let mut times = vec![0.];
+        for gap in [10000.0, 9999.5, 10000.5, 9999.875, 10000.125, 10000.0] {
+            times.push(times.last().unwrap() + gap);
+        }
+        let gap = modal_gap_ps(&times).expect("a spacing");
+        assert!(
+            (gap - 10000.).abs() < 1.,
+            "jitter split the mode: got {gap}"
+        );
+    }
+
+    // Rounding to 4 significant digits must not sort two all-but-identical gaps
+    // into different buckets just because they straddle a power of ten.
+    #[test]
+    fn gap_bucket_agrees_across_a_power_of_ten() {
+        assert_eq!(gap_bucket(9999.9999), gap_bucket(10000.0001));
+        assert_eq!(gap_bucket(10000.), gap_bucket(10000.0001));
+        // Genuinely different spacings still separate.
+        assert_ne!(gap_bucket(10000.), gap_bucket(20000.));
+        assert_ne!(gap_bucket(10000.), gap_bucket(100000.));
+    }
+
+    // A trajectory whose stamps never advance has no measurable spacing, and
+    // saying so is better than reporting a zero-length run.
+    #[test]
+    fn modal_gap_is_none_when_no_frame_advances() {
+        assert_eq!(modal_gap_ps(&[5., 5., 5.]), None);
+        assert_eq!(modal_gap_ps(&[100., 50., 10.]), None);
+        assert_eq!(modal_gap_ps(&[42.]), None);
+    }
+
+    #[test]
+    fn frame_times_parse_from_molly_times_output() {
+        // molly leaves a trailing tab where the --steps column would go.
+        let stdout = "0.000\t\n10000.000\t\n20000.000\t\n";
+        let times = parse_frame_times(stdout, Path::new("t.xtc")).unwrap();
+        assert_eq!(times, vec![0., 10000., 20000.]);
+    }
+
+    #[test]
+    fn frame_times_parse_tolerates_blank_lines_and_rejects_garbage() {
+        let times =
+            parse_frame_times("0.000\t\n\n10000.000\t\n", Path::new("t.xtc")).unwrap();
+        assert_eq!(times, vec![0., 10000.]);
+        assert!(parse_frame_times("0.000\tnot-a-time\n", Path::new("t.xtc")).is_ok());
+        assert!(parse_frame_times("not-a-time\n", Path::new("t.xtc")).is_err());
     }
 
     #[test]
