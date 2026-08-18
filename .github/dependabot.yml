@@ -1,0 +1,35 @@
+version: 2
+
+updates:
+  # Monthly and grouped, not weekly and per-crate. The point of these PRs is
+  # that someone reads them: rust.yml proves a bump compiles, formats and
+  # passes the tests that exist, but coverage is thin -- mdr-process's import
+  # path has none -- so a green check is evidence about the build, not about
+  # the pipeline. One reviewable PR a month is worth more here than a stream
+  # nobody has time to look at.
+  #
+  # Security fixes do not come through this. Dependabot's security updates are
+  # enabled separately and open their own PRs as advisories land, regardless of
+  # this schedule, which is why the routine cadence can afford to be slow.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    groups:
+      all-dependencies:
+        patterns:
+          - "*"
+    commit-message:
+      prefix: "deps"
+
+  # The workflows themselves pin action versions, and those go stale silently:
+  # nothing fails, they just keep running an old runner image until one day the
+  # pinned major is dropped.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: "ci"
