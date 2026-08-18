@@ -440,7 +440,27 @@ fn process_landing(
                     &ctx.orcid,
                     &filenames,
                 ) {
-                    Ok(upload_id) => {
+                    Ok((upload_id, done)) => {
+                        // Nothing has been done to this landing yet, so this
+                        // is the cheapest possible place to notice there is
+                        // nothing to do. Skipping keeps the landing counted as
+                        // a success, which is what lets a repair run finish
+                        // clean and finally set processing_complete.
+                        if done && !args.force {
+                            log_message(
+                                &mut conn,
+                                upload_id,
+                                "Skipped: already processed successfully \
+                                 (--force to reprocess)",
+                                false,
+                                false,
+                            );
+                            debug!(
+                                r#"Skipping "{landing_id}": already processed"#
+                            );
+                            return Ok(());
+                        }
+
                         log_message(
                             &mut conn,
                             upload_id,
@@ -591,6 +611,19 @@ fn process_landing(
 
 // --------------------------------------------------
 /// Upsert the upload instance for `(ticket_id, landing_id)`; returns its id.
+/// Returns the upload instance's id, and whether this landing has already been
+/// processed successfully.
+///
+/// "Already done" needs two independent signals agreeing, the same pair the
+/// landing purge uses to decide a landing is safe to delete:
+/// `md_upload_instance.successful`, which is the pipeline's opinion of its own
+/// run, and `is_placeholder = false` on the simulation it produced, which is
+/// only ever cleared by a push this program verified. Either alone is too
+/// weak -- `successful` is self-assessment, and a placeholder cannot tell a
+/// landing that failed from one nobody has reached yet.
+///
+/// A landing with no instance, no simulation, or a placeholder simulation is
+/// not done, which is the safe direction: it processes exactly as before.
 fn ensure_upload_instance(
     conn: &mut PgConnection,
     ticket_id: i64,
@@ -598,7 +631,7 @@ fn ensure_upload_instance(
     user_id: i64,
     orcid: &str,
     filenames: &str,
-) -> Result<i64> {
+) -> Result<(i64, bool)> {
     let (_, existing) = ops::list_upload_instances(
         conn,
         None,
@@ -613,7 +646,15 @@ fn ensure_upload_instance(
         .into_iter()
         .find(|inst| inst.landing_id.as_deref() == Some(landing_id))
     {
-        return Ok(instance.id);
+        let done = instance.successful == Some(true)
+            && match instance.simulation_id {
+                Some(sim_id) => ops::get_simulation(conn, sim_id)
+                    .map(|sim| !sim.is_placeholder)
+                    .unwrap_or(false),
+                None => false,
+            };
+
+        return Ok((instance.id, done));
     }
 
     let instance = ops::insert_upload_instance(
@@ -629,7 +670,7 @@ fn ensure_upload_instance(
             landing_id: Some(landing_id.to_string()),
         },
     )?;
-    Ok(instance.id)
+    Ok((instance.id, false))
 }
 
 // --------------------------------------------------
