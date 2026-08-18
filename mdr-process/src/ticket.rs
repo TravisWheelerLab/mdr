@@ -455,9 +455,7 @@ fn process_landing(
                                 false,
                                 false,
                             );
-                            debug!(
-                                r#"Skipping "{landing_id}": already processed"#
-                            );
+                            debug!(r#"Skipping "{landing_id}": already processed"#);
                             return Ok(());
                         }
 
