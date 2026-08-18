@@ -160,6 +160,7 @@ diesel::table! {
         num_replicates -> Nullable<Int4>,
         irods_ticket -> Nullable<Varchar>,
         superseding_simulation_id -> Nullable<Int4>,
+        search_text -> Text,
     }
 }
 

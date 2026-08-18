@@ -1443,7 +1443,8 @@ CREATE TABLE public.md_simulation (
     is_embargoed boolean NOT NULL,
     is_coarse_grained boolean NOT NULL,
     irods_ticket character varying(255),
-    superseding_simulation_id integer
+    superseding_simulation_id integer,
+    search_text text DEFAULT ''::text NOT NULL
 );
 
 

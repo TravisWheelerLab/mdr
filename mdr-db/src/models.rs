@@ -473,6 +473,9 @@ pub struct Simulation {
     pub num_replicates: Option<i32>,
     pub irods_ticket: Option<String>,
     pub superseding_simulation_id: Option<i32>,
+    /// Denormalized, trigger-maintained search column; see migration
+    /// 0260_simulation_search_text. Never set this directly.
+    pub search_text: String,
 }
 
 #[derive(Debug, Insertable, Deserialize)]
@@ -509,6 +512,10 @@ pub struct NewSimulation {
     pub irods_ticket: Option<String>,
     pub superseding_simulation_id: Option<i32>,
     pub md_repo_ticket_id: Option<i64>,
+    // search_text intentionally omitted: the column has a '' DB default (see
+    // Django migration 0261) and is immediately overwritten by
+    // trg_simulation_search_text after insert; see migration
+    // 0260_simulation_search_text. Never set it from application code.
 }
 
 #[derive(Debug, AsChangeset, Default, Deserialize)]
