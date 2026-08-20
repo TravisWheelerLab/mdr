@@ -29,6 +29,9 @@ pub struct Args {
 pub enum FileFormat {
     Json,
     Toml,
+    /// Pared-down public record (see `libmdrepo::metadata::Summary`),
+    /// written as JSON for the nightly static.mdrepo.org export.
+    PublicJson,
 }
 
 impl fmt::Display for FileFormat {
@@ -37,7 +40,7 @@ impl fmt::Display for FileFormat {
             f,
             "{}",
             match self {
-                FileFormat::Json => "json",
+                FileFormat::Json | FileFormat::PublicJson => "json",
                 FileFormat::Toml => "toml",
             }
         )
@@ -46,13 +49,14 @@ impl fmt::Display for FileFormat {
 
 impl ValueEnum for FileFormat {
     fn value_variants<'a>() -> &'a [Self] {
-        &[FileFormat::Json, FileFormat::Toml]
+        &[FileFormat::Json, FileFormat::Toml, FileFormat::PublicJson]
     }
 
     fn to_possible_value<'a>(&self) -> Option<PossibleValue> {
         Some(match self {
             FileFormat::Json => PossibleValue::new("json"),
             FileFormat::Toml => PossibleValue::new("toml"),
+            FileFormat::PublicJson => PossibleValue::new("public-json"),
         })
     }
 }
