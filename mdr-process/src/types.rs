@@ -20,9 +20,11 @@ pub const DEFAULT_BLAST_NUM_THREADS: usize = 2;
 /// upload workers -- alternating the setting between rounds so link drift
 /// falls on both sides:
 ///
-///     threads   mean MB/s   median   paired rounds won
-///     2          64.8        67.2     0 of 8
-///     3          88.5        89.3     7 of 8 (8th a tie)
+/// ```text
+/// threads   mean MB/s   median   paired rounds won
+/// 2          64.8        67.2     0 of 8
+/// 3          88.5        89.3     7 of 8 (8th a tie)
+/// ```
 ///
 /// 3 never lost a paired round. It costs 25 IRODS connections at that
 /// concurrency (8 workers x 3 + 1 control) against 17 for 2 threads, and the
