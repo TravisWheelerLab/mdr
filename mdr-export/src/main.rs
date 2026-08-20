@@ -377,8 +377,17 @@ fn get_sim(conn: &mut PgConnection, sim_id: i64) -> Result<metadata::Meta> {
 
 // --------------------------------------------------
 fn get_sim_summary(conn: &mut PgConnection, sim_id: i64) -> Result<metadata::Summary> {
-    let meta = get_sim(conn, sim_id)?;
+    let mut meta = get_sim(conn, sim_id)?;
     let sim = ops::get_simulation(conn, sim_id)?;
+
+    // Not part of the public record. Dropped here rather than in Meta, whose
+    // additional_files is load-bearing elsewhere -- mdr-meta generates it,
+    // the v1 converter carries it across, and Meta's own validation reads it.
+    // Costs nothing to discard: it is a by-product of the list_uploaded_files
+    // call get_sim already makes for the primary filenames, not a query of
+    // its own. The field is skip_serializing_if = "Option::is_none", so None
+    // omits the key rather than emitting a null.
+    meta.additional_files = None;
 
     Ok(metadata::Summary {
         id: sim.id,
