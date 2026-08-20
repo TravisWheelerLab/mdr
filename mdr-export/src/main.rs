@@ -52,18 +52,22 @@ fn run(args: Args) -> Result<()> {
 
         if !out_file.exists() || args.overwrite {
             println!();
-            match get_sim(&mut conn, sim_id) {
-                Ok(meta) => {
+            let content = if args.format == FileFormat::PublicJson {
+                get_sim_summary(&mut conn, sim_id).and_then(|s| s.to_json())
+            } else {
+                get_sim(&mut conn, sim_id).and_then(|meta| {
+                    if args.format == FileFormat::Json {
+                        meta.to_json()
+                    } else {
+                        meta.to_toml()
+                    }
+                })
+            };
+
+            match content {
+                Ok(content) => {
                     let mut out_fh = File::create(&out_file)?;
-                    write!(
-                        out_fh,
-                        "{}",
-                        if args.format == FileFormat::Json {
-                            meta.to_json()?
-                        } else {
-                            meta.to_toml()?
-                        }
-                    )?;
+                    write!(out_fh, "{content}")?;
                 }
                 Err(e) => {
                     eprintln!("{e}");
@@ -329,4 +333,21 @@ fn get_sim(conn: &mut PgConnection, sim_id: i64) -> Result<metadata::Meta> {
     };
 
     Ok(meta)
+}
+
+// --------------------------------------------------
+fn get_sim_summary(conn: &mut PgConnection, sim_id: i64) -> Result<metadata::Summary> {
+    let meta = get_sim(conn, sim_id)?;
+    let sim = ops::get_simulation(conn, sim_id)?;
+
+    Ok(metadata::Summary {
+        id: sim.id,
+        duration: sim.duration,
+        num_replicates: sim.num_replicates,
+        is_deprecated: sim.is_deprecated,
+        is_placeholder: sim.is_placeholder,
+        creation_date: sim.creation_date,
+        superseding_simulation_id: sim.superseding_simulation_id,
+        meta,
+    })
 }

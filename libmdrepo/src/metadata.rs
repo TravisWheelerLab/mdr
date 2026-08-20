@@ -1,6 +1,6 @@
 use crate::{common::read_file, constants};
 use anyhow::{Result, anyhow, bail};
-use chrono::Datelike;
+use chrono::{DateTime, Datelike, Utc};
 use serde::{Deserialize, Serialize};
 use std::{borrow::Cow::Borrowed, collections::HashMap, ffi::OsStr, path::Path};
 use validator::{Validate, ValidationError, ValidationErrorsKind};
@@ -542,6 +542,43 @@ impl Meta {
             is_embargoed: None,
             contributors: None,
         }
+    }
+}
+
+/// A pared-down public record: `Meta` plus the handful of database-only
+/// fields (id, duration, replicate count, deprecation/embargo status) that
+/// submitters never set but that a public catalog dump needs. Serialize-only
+/// -- it exists for the nightly public JSON export, not for round-tripping
+/// submissions, so unlike `Meta` it carries no `Deserialize` or `Validate`.
+/// Deliberately excludes contributions, rmsd_values, rmsf_values,
+/// replicate_group, uploaded_files, and processed_files, which the public
+/// API serializer includes but which would needlessly bloat 50K+ files.
+#[derive(Debug, Serialize)]
+pub struct Summary {
+    pub id: i64,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration: Option<f64>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_replicates: Option<i32>,
+
+    pub is_deprecated: bool,
+
+    pub is_placeholder: bool,
+
+    pub creation_date: DateTime<Utc>,
+
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub superseding_simulation_id: Option<i32>,
+
+    #[serde(flatten)]
+    pub meta: Meta,
+}
+
+impl Summary {
+    pub fn to_json(&self) -> Result<String> {
+        serde_json::to_string_pretty(&self).map_err(Into::into)
     }
 }
 
@@ -1125,7 +1162,9 @@ mod tests {
     const JSON_OK1: &str = "tests/inputs/metadata/ok1.json";
     const JSON_BAD1: &str = "tests/inputs/metadata/bad1.json";
 
-    use super::{AdditionalFile, Meta, MetaCheckOptions, is_valid_smiles};
+    use super::{
+        AdditionalFile, DateTime, Meta, MetaCheckOptions, Summary, Utc, is_valid_smiles,
+    };
     use anyhow::Result;
     use std::path::PathBuf;
     use validator::Validate;
@@ -1661,5 +1700,60 @@ mod tests {
             errors.iter().any(|e| e.contains("is duplicated")),
             "Expected duplicate filename error, got: {errors:?}"
         );
+    }
+
+    // --- Summary ---
+
+    #[test]
+    fn summary_json_flattens_meta_and_adds_public_fields() -> Result<()> {
+        let summary = Summary {
+            id: 42,
+            duration: Some(12.5),
+            num_replicates: Some(3),
+            is_deprecated: false,
+            is_placeholder: false,
+            creation_date: DateTime::parse_from_rfc3339("2024-01-01T00:00:00Z")
+                .expect("valid rfc3339 timestamp")
+                .with_timezone(&Utc),
+            superseding_simulation_id: None,
+            meta: Meta::example_minimal(),
+        };
+
+        let json = summary.to_json()?;
+        let value: serde_json::Value = serde_json::from_str(&json)?;
+
+        assert_eq!(value["id"], 42);
+        assert_eq!(value["duration"], 12.5);
+        assert_eq!(value["num_replicates"], 3);
+        assert_eq!(value["is_deprecated"], false);
+        assert_eq!(value["creation_date"], "2024-01-01T00:00:00Z");
+
+        // Meta's fields are flattened to the top level, not nested.
+        assert_eq!(value["structure_file_name"], "struct.pdb");
+        assert_eq!(value["software_name"], "GROMACS");
+
+        // None-valued optional fields are omitted rather than serialized
+        // as null.
+        assert!(value.get("superseding_simulation_id").is_none());
+
+        // The public export deliberately excludes these -- they aren't
+        // fields on Summary, so this also guards against a future
+        // `#[serde(flatten)]` of the full API-shaped struct reintroducing
+        // them by accident.
+        for excluded in [
+            "contributions",
+            "rmsd_values",
+            "rmsf_values",
+            "replicate_group",
+            "uploaded_files",
+            "processed_files",
+        ] {
+            assert!(
+                value.get(excluded).is_none(),
+                "Summary should not serialize {excluded:?}"
+            );
+        }
+
+        Ok(())
     }
 }

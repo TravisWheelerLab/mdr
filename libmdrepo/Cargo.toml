@@ -5,7 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
-chrono = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
 lazy-regex = "3"
 log = "0.4.29"
 purr = "0.9.0"
