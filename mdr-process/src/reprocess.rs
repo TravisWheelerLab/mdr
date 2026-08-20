@@ -119,6 +119,21 @@ fn irods_fetch(irods_path: &Path, local_path: &Path) -> Result<()> {
         let mut cmd = Command::new("gocmd");
         cmd.args([
             "get",
+            // One transfer thread, not gocmd's default of 5 per file.
+            //
+            // CyVerse's 500-connection ceiling is global across all of their
+            // users and we have been holding 200-400 of it, so a single file
+            // claiming five connections is expensive well beyond this process.
+            // It costs almost nothing: measured 2026-08-20 on an 82 MB release
+            // object, the default took 16.9s and 4 connections against 18.5s
+            // and 2 for one thread per file.
+            //
+            // This fetches one file per invocation, so --thread_num_per_file
+            // and --single_threaded would behave the same here; the explicit
+            // per-file cap is the one that stays correct if this ever passes
+            // several sources at once.
+            "--thread_num_per_file",
+            "1",
             irods_path.to_string_lossy().as_ref(),
             local_path.to_string_lossy().as_ref(),
         ]);
