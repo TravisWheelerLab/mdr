@@ -7,6 +7,20 @@ use std::path::{Path, PathBuf};
 /// via `--blast-num-threads` on the process and ticket subcommands.
 pub const DEFAULT_BLAST_NUM_THREADS: usize = 2;
 
+/// Default `--transfer-threads` passed to `push_sim_files.py`: streams
+/// python-irodsclient may open for a single `put`. Overridable per run via
+/// `--transfer-threads`, and worth overriding per host -- this value was
+/// measured on the processing VM only.
+///
+/// Measured on md-process-2 2026-08-20, four concurrent puts of 300 MB:
+/// 1 thread gave 28.9 MB/s aggregate over 5 IRODS connections, 2 gave 42.8
+/// over 9, and python-irodsclient's own default of 3 gave 47.1 over 13. 2 and
+/// 3 sit inside run-to-run noise of each other, so the third stream costs 4
+/// connections per push and buys nothing measurable. 1 is the setting to
+/// avoid: it fails `should_parallelize_transfer()` and drops the put into a
+/// serial chunked write.
+pub const DEFAULT_PUSH_TRANSFER_THREADS: usize = 2;
+
 // --------------------------------------------------
 #[derive(Parser, Debug)]
 #[command(arg_required_else_help = true, version, about)]
@@ -101,6 +115,10 @@ pub struct ProcessArgs {
     #[arg(long, value_name = "N", default_value_t = DEFAULT_BLAST_NUM_THREADS)]
     pub blast_num_threads: usize,
 
+    /// Streams python-irodsclient may open for a single `put`
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_PUSH_TRANSFER_THREADS)]
+    pub transfer_threads: usize,
+
     /// The upload ticket this landing belongs to, recorded on the imported
     /// simulation so the ticket view can count its simulations. Set by the
     /// ticket flow; `None` for direct/reprocess runs that have no ticket.
@@ -152,6 +170,10 @@ pub struct TicketArgs {
     /// Threads for each `blastp` search (`-num_threads`)
     #[arg(long, value_name = "N", default_value_t = DEFAULT_BLAST_NUM_THREADS)]
     pub blast_num_threads: usize,
+
+    /// Streams python-irodsclient may open for a single `put`
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_PUSH_TRANSFER_THREADS)]
+    pub transfer_threads: usize,
 }
 
 // --------------------------------------------------
@@ -189,6 +211,10 @@ pub struct ReprocessArgs {
     /// Threads for each `blastp` search (`-num_threads`)
     #[arg(long, value_name = "N", default_value_t = DEFAULT_BLAST_NUM_THREADS)]
     pub blast_num_threads: usize,
+
+    /// Streams python-irodsclient may open for a single `put`
+    #[arg(long, value_name = "N", default_value_t = DEFAULT_PUSH_TRANSFER_THREADS)]
+    pub transfer_threads: usize,
 }
 
 // --------------------------------------------------

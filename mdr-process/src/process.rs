@@ -194,6 +194,7 @@ pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
             &args.server.to_string(),
             args.reprocess_simulation_id,
             &processed_dir,
+            args.transfer_threads,
         )?;
         push_elapsed = Some(push_start.elapsed());
         debug!("{push_outcome:?}");
@@ -277,6 +278,7 @@ fn run_push(
     server: &str,
     reprocess_simulation_id: Option<u64>,
     processed_dir: &Path,
+    transfer_threads: usize,
 ) -> Result<PushOutcome> {
     let push_script = script_dir.join("push_sim_files.py");
     let out_file = processed_dir.join("pushed.json");
@@ -298,6 +300,8 @@ fn run_push(
         input_dir.to_string_lossy().to_string(),
         "--out-file".to_string(),
         out_file.to_string_lossy().to_string(),
+        "--transfer-threads".to_string(),
+        transfer_threads.to_string(),
     ];
 
     if reprocess_simulation_id.is_some() {

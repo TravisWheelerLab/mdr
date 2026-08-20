@@ -531,6 +531,7 @@ fn process_landing(
             dry_run: args.dry_run,
             replace_original_files: false,
             blast_num_threads: args.blast_num_threads,
+            transfer_threads: args.transfer_threads,
             ticket_id: Some(args.ticket_id as i64),
         }),
     };
