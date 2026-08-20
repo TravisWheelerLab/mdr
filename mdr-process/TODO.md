@@ -71,7 +71,7 @@ Decide whether that is acceptable. If it is not, the options are roughly:
 
 ---
 
-## Task E — tests for `import.rs`  (ACTIVE)
+## Task E — tests for `import.rs`  (PARTIALLY SHIPPED 2026-08-20)
 
 `mdr-process/src/import.rs` has **no tests of its own.** `mdr-db`'s natural-key
 finders have 11 (`mdr-db/tests/finders.rs`), but nothing exercises
@@ -102,6 +102,36 @@ staging simulation 80 on 2026-07-21, so they are the known-good behavior:
    /software is found and linked, and no second row appears.
 6. **The transaction rolls back as a unit**: force a failure partway through and
    assert no half-imported simulation survives.
+
+**Shipped 2026-08-20** (`be7eb22`, `mdr-process/tests/import.rs`, run via
+`mdr-process/tests/with-testdb.sh` — a thin wrapper reusing `mdr-db`'s
+docker-compose fixture and schema rather than duplicating them): real
+coverage of `import_simulation`'s own orchestration where there was none, but
+not the full spec above. Case by case:
+
+- **Case 1** (fresh import) — covered for row creation across every child
+  table; not asserting the NULL-vs-`""` text behavior called out here.
+- **Case 2** (re-import doesn't duplicate) — covered for uploaded files, one
+  contributor, one ligand; not yet extended to processed files, replicates,
+  solutes, external links, papers, or uniprot.
+- **Case 3** (reprocess) — covered for the processed-file delete/reinsert and
+  uploaded files staying put; not asserting the `md_simulation` row
+  (`creation_date` included) is otherwise unchanged.
+- **Case 4** (`replace_original_files`) — covered for the uploaded-file
+  delete/reinsert; not asserting `is_primary`/`local_file_path`
+  re-derivation specifically.
+- **Case 5** (shared entities reused across *different* simulations, not
+  duplicated) — **not covered.** The new suite only re-imports against the
+  same simulation; two simulations sharing a pub/uniprot/pdb/software row is
+  untested. Probably the next-highest-value addition — it's the shared-entity
+  path MDR-37 already found a real bug in (`md_software`).
+- **Case 6** (transaction rolls back as a unit on partial failure) — **not
+  covered.**
+
+Also see `notes/projects/mdrepo/TODO.md` MDR-14 (tracks this at the project
+level) and MDR-57 (opened alongside this: CI never actually sets
+`TEST_DATABASE_URL`, so neither this suite nor `mdr-db/tests/finders.rs`
+runs automatically today).
 
 ---
 
