@@ -6,6 +6,7 @@ use libmdrepo::{constants, metadata};
 use mdr_db::ops;
 use mdr_export::types::{Args, FileFormat, Server};
 use std::{
+    collections::HashSet,
     env,
     fs::{self, File},
     io::Write,
@@ -39,13 +40,21 @@ fn run(args: Args) -> Result<()> {
 
     let mut conn = mdr_db::connect(&url)?;
 
-    // An explicit --simulation-ids list is taken as given: it is the "export
-    // exactly these" escape hatch, so --visible-only does not silently drop
-    // rows the caller named. The flag governs the "export everything" path,
-    // which is the one that feeds the public static export.
+    // public-json is a promise about which rows are exported, not only about
+    // the shape of each one: a "public record" describing an embargoed
+    // simulation is a leak whatever fields it carries. So the format selects
+    // the publicly visible set, and narrows an explicit --simulation-ids list
+    // to it as well. Exempting named IDs would make the guarantee hold only
+    // for whole-database exports -- which is precisely the case where someone
+    // would then assume it holds everywhere.
+    let public_only = args.format == FileFormat::PublicJson;
     let simulation_ids = if !args.simulation_ids.is_empty() {
-        args.simulation_ids
-    } else if args.visible_only {
+        if public_only {
+            keep_visible(&mut conn, args.simulation_ids)?
+        } else {
+            args.simulation_ids
+        }
+    } else if public_only {
         ops::get_visible_simulation_ids(&mut conn)?
     } else {
         ops::get_all_simulation_ids(&mut conn)?
@@ -85,6 +94,31 @@ fn run(args: Args) -> Result<()> {
     }
 
     Ok(())
+}
+
+// --------------------------------------------------
+/// Narrow an explicitly requested ID list to the publicly visible ones,
+/// naming anything dropped.
+fn keep_visible(conn: &mut PgConnection, requested: Vec<i64>) -> Result<Vec<i64>> {
+    let visible: HashSet<i64> =
+        ops::get_visible_simulation_ids(conn)?.into_iter().collect();
+    let (keep, dropped): (Vec<i64>, Vec<i64>) =
+        requested.into_iter().partition(|id| visible.contains(id));
+
+    if !dropped.is_empty() {
+        // Loud, and by name. The alternative is an empty output directory and
+        // no stated reason, which reads as a broken exporter rather than as
+        // the format doing its job.
+        let names: Vec<String> =
+            dropped.iter().map(|id| format!("MDR{id:08}")).collect();
+        eprintln!(
+            "Skipping {} simulation(s) not publicly visible: {}",
+            dropped.len(),
+            names.join(", ")
+        );
+    }
+
+    Ok(keep)
 }
 
 // --------------------------------------------------

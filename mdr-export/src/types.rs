@@ -22,12 +22,6 @@ pub struct Args {
     /// Force overwrite of existing files
     #[arg(short('O'), long)]
     pub overwrite: bool,
-
-    /// Export only publicly visible simulations, i.e. the same set the Django
-    /// app's /simulation_list endpoint serves (approved, and not embargoed,
-    /// deprecated, or a placeholder). Ignored when --simulation-ids is given.
-    #[arg(short('V'), long)]
-    pub visible_only: bool,
 }
 
 // --------------------------------------------------
@@ -37,6 +31,12 @@ pub enum FileFormat {
     Toml,
     /// Pared-down public record (see `libmdrepo::metadata::Summary`),
     /// written as JSON for the nightly static.mdrepo.org export.
+    ///
+    /// This selects rows as well as shaping them: only publicly visible
+    /// simulations are exported, i.e. the set the Django app's
+    /// /simulation_list endpoint serves. A "public" record describing an
+    /// embargoed simulation would be a leak whatever shape it is in, so the
+    /// two are one decision rather than two.
     PublicJson,
 }
 
