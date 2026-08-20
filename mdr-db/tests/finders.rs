@@ -1,5 +1,5 @@
-//! Integration tests for the import natural-key finders and the reprocess
-//! delete-cascade helpers in `mdr_db::ops`.
+//! Integration tests for the import natural-key finders, the reprocess
+//! delete-cascade helpers, and the public-visibility selector in `mdr_db::ops`.
 //!
 //! These need a Postgres loaded with the mdrepo schema. The easiest way to run
 //! them is `mdr-db/tests/with-testdb.sh`, which spins up an ephemeral container,
@@ -83,6 +83,19 @@ fn seed_orcid(c: &mut PgConnection, user_id: i64, provider: &str, orcid: &str) {
 }
 
 fn seed_sim(c: &mut PgConnection) -> i64 {
+    // The historical default: a placeholder, unapproved simulation.
+    seed_sim_with_flags(c, false, false, true, false)
+}
+
+/// Seed a simulation with the four flags that decide public visibility set
+/// explicitly, so a test can say exactly which corner it is exercising.
+fn seed_sim_with_flags(
+    c: &mut PgConnection,
+    public: bool,
+    deprecated: bool,
+    placeholder: bool,
+    embargoed: bool,
+) -> i64 {
     ops::insert_simulation(
         c,
         NewSimulation {
@@ -104,14 +117,14 @@ fn seed_sim(c: &mut PgConnection) -> i64 {
             forcefield: None,
             forcefield_comments: None,
             temperature: None,
-            is_placeholder: true,
-            is_deprecated: false,
-            is_public: false,
+            is_placeholder: placeholder,
+            is_deprecated: deprecated,
+            is_public: public,
             protonation_method: None,
             fasta_sequence: None,
             alias: None,
             pdb_id: None,
-            is_embargoed: false,
+            is_embargoed: embargoed,
             is_coarse_grained: false,
             num_replicates: None,
             irods_ticket: None,
@@ -810,4 +823,65 @@ fn delete_uploaded_files_removes_files_and_links_only_for_sim() {
         ops::list_download_uploaded_files(&mut c, Some(di), None, true, None, None)
             .unwrap();
     assert_eq!(links, 0, "download link removed");
+}
+
+// ── get_visible_simulation_ids ────────────────────────────────────────────────
+//
+// These pin the predicate that decides what the public static export on
+// static.mdrepo.org publishes. A regression here does not fail loudly -- it
+// silently ships embargoed or unapproved science to a world-readable tarball --
+// so each of the three suppressing flags gets its own case rather than one
+// combined "happy path" assertion.
+
+#[test]
+fn visible_ids_include_a_fully_released_simulation() {
+    let mut c = conn_or_skip!();
+    let sim = seed_sim_with_flags(&mut c, true, false, false, false);
+
+    let ids = ops::get_visible_simulation_ids(&mut c).unwrap();
+    assert!(ids.contains(&sim), "released simulation is visible");
+}
+
+#[test]
+fn visible_ids_exclude_unapproved_embargoed_deprecated_and_placeholder() {
+    let mut c = conn_or_skip!();
+
+    let released = seed_sim_with_flags(&mut c, true, false, false, false);
+    // Each of these differs from "released" in exactly one flag.
+    let unapproved = seed_sim_with_flags(&mut c, false, false, false, false);
+    let embargoed = seed_sim_with_flags(&mut c, true, false, false, true);
+    let deprecated = seed_sim_with_flags(&mut c, true, true, false, false);
+    let placeholder = seed_sim_with_flags(&mut c, true, false, true, false);
+
+    let ids = ops::get_visible_simulation_ids(&mut c).unwrap();
+
+    assert!(ids.contains(&released), "control row is visible");
+    assert!(!ids.contains(&unapproved), "unapproved is hidden");
+    assert!(
+        !ids.contains(&embargoed),
+        "embargoed is hidden even though is_public is true -- embargo \
+         outlives approval, so is_public alone is not the gate"
+    );
+    assert!(!ids.contains(&deprecated), "deprecated is hidden");
+    assert!(!ids.contains(&placeholder), "placeholder is hidden");
+}
+
+#[test]
+fn visible_ids_are_a_subset_of_all_ids_and_ascending() {
+    let mut c = conn_or_skip!();
+    seed_sim_with_flags(&mut c, true, false, false, false);
+    seed_sim_with_flags(&mut c, false, false, false, false);
+
+    let all = ops::get_all_simulation_ids(&mut c).unwrap();
+    let visible = ops::get_visible_simulation_ids(&mut c).unwrap();
+
+    assert!(
+        visible.iter().all(|id| all.contains(id)),
+        "visible is a subset of all"
+    );
+    // mdr-export names each output file after the id, so a stable ascending
+    // order is what makes a nightly tarball diffable against the previous one.
+    let mut sorted = visible.clone();
+    sorted.sort();
+    assert_eq!(visible, sorted, "ids come back ascending");
 }

@@ -39,10 +39,16 @@ fn run(args: Args) -> Result<()> {
 
     let mut conn = mdr_db::connect(&url)?;
 
-    let simulation_ids = if args.simulation_ids.is_empty() {
-        ops::get_all_simulation_ids(&mut conn)?
-    } else {
+    // An explicit --simulation-ids list is taken as given: it is the "export
+    // exactly these" escape hatch, so --visible-only does not silently drop
+    // rows the caller named. The flag governs the "export everything" path,
+    // which is the one that feeds the public static export.
+    let simulation_ids = if !args.simulation_ids.is_empty() {
         args.simulation_ids
+    } else if args.visible_only {
+        ops::get_visible_simulation_ids(&mut conn)?
+    } else {
+        ops::get_all_simulation_ids(&mut conn)?
     };
 
     for (i, sim_id) in simulation_ids.into_iter().enumerate() {

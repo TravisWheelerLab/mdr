@@ -22,6 +22,12 @@ pub struct Args {
     /// Force overwrite of existing files
     #[arg(short('O'), long)]
     pub overwrite: bool,
+
+    /// Export only publicly visible simulations, i.e. the same set the Django
+    /// app's /simulation_list endpoint serves (approved, and not embargoed,
+    /// deprecated, or a placeholder). Ignored when --simulation-ids is given.
+    #[arg(short('V'), long)]
+    pub visible_only: bool,
 }
 
 // --------------------------------------------------

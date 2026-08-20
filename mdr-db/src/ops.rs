@@ -831,6 +831,36 @@ pub fn get_all_simulation_ids(conn: &mut PgConnection) -> QueryResult<Vec<i64>> 
     md_simulation.select(id).order(id.asc()).load(conn)
 }
 
+/// IDs of the simulations that are visible to the public, i.e. the exact set
+/// the Django app's `/simulation_list` endpoint serves.
+///
+/// This mirrors `visible_simulations_q()` in the Django app
+/// (`md_repo_app/models/simulation/simulation_filters.py`), which is the source
+/// of truth for "publicly visible". All four conditions are required, and the
+/// two easy ones to forget are the ones that matter: `is_public` alone is not
+/// enough because embargo outlives approval, and a placeholder row is a
+/// simulation whose files have not landed yet. On production this is the
+/// difference between 72,998 rows and 54,601.
+///
+/// Note this is deliberately STRICTER than `Simulation.is_visible_to()` in the
+/// same Django app, which omits `is_deprecated` so a deprecated simulation
+/// stays reachable by direct link while being hidden from browse. Anything
+/// built on this function inherits the list-endpoint rule, not the detail one.
+///
+/// There is a third copy of this predicate, in SQL, as `VISIBLE_SIM` in
+/// `utils/python/export_mapping_file.py`. Change one, change all three.
+pub fn get_visible_simulation_ids(conn: &mut PgConnection) -> QueryResult<Vec<i64>> {
+    use crate::schema::md_simulation::dsl::*;
+    md_simulation
+        .filter(is_public.eq(true))
+        .filter(is_deprecated.eq(false))
+        .filter(is_placeholder.eq(false))
+        .filter(is_embargoed.eq(false))
+        .select(id)
+        .order(id.asc())
+        .load(conn)
+}
+
 fn simulation_query(
     search: Option<&str>,
     public_only: bool,
