@@ -12,14 +12,33 @@ pub const DEFAULT_BLAST_NUM_THREADS: usize = 2;
 /// `--transfer-threads`, and worth overriding per host -- this value was
 /// measured on the processing VM only.
 ///
-/// Measured on md-process-2 2026-08-20, four concurrent puts of 300 MB:
-/// 1 thread gave 28.9 MB/s aggregate over 5 IRODS connections, 2 gave 42.8
-/// over 9, and python-irodsclient's own default of 3 gave 47.1 over 13. 2 and
-/// 3 sit inside run-to-run noise of each other, so the third stream costs 4
-/// connections per push and buys nothing measurable. 1 is the setting to
-/// avoid: it fails `should_parallelize_transfer()` and drops the put into a
-/// serial chunked write.
-pub const DEFAULT_PUSH_TRANSFER_THREADS: usize = 2;
+/// 3 matches what python-irodsclient picks on its own, but it is set
+/// explicitly because it was measured rather than inherited.
+///
+/// Measured on md-process-2 2026-08-20 at the concurrency this host actually
+/// runs -- eight concurrent puts of 300 MB, being two ingest jobs of four
+/// upload workers -- alternating the setting between rounds so link drift
+/// falls on both sides:
+///
+///     threads   mean MB/s   median   paired rounds won
+///     2          64.8        67.2     0 of 8
+///     3          88.5        89.3     7 of 8 (8th a tie)
+///
+/// 3 never lost a paired round. It costs 25 IRODS connections at that
+/// concurrency (8 workers x 3 + 1 control) against 17 for 2 threads, and the
+/// 1.37x throughput is worth the 8 sockets.
+///
+/// An earlier revision of this constant was 2, on a run at *four* concurrent
+/// puts where 2 and 3 were inside run-to-run noise of each other (42.8 against
+/// 47.1 MB/s). That did not survive being re-measured at eight. Concurrency
+/// changes the answer, so re-measure before moving this rather than
+/// extrapolating -- extrapolating across regimes is what produced both this
+/// error and the `num_threads=1` regression it followed.
+///
+/// 1 remains the setting to avoid outright: it fails
+/// `should_parallelize_transfer()` and drops the put into a synchronous
+/// chunked write over one connection.
+pub const DEFAULT_PUSH_TRANSFER_THREADS: usize = 3;
 
 // --------------------------------------------------
 #[derive(Parser, Debug)]
