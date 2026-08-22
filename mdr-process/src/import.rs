@@ -6,6 +6,9 @@
 //! Everything happens inside **one transaction**, so a failure leaves no
 //! half-imported simulation behind (the script ran with `autocommit = True`).
 //!
+//! The one deliberate exception is the `md_software` lookup, which is resolved
+//! *before* that transaction opens -- see [`import_simulation`].
+//!
 //! Each step mirrors one of the script's `create_*` helpers: find by natural
 //! key, then update that row or insert a new one.
 //!
@@ -65,14 +68,29 @@ pub struct ImportOpts {
 
 // --------------------------------------------------
 /// Import a processed simulation, returning its `md_simulation.id`. All writes
-/// share one transaction and roll back together on any error.
+/// share one transaction and roll back together on any error -- except the
+/// `md_software` lookup, which is resolved first, outside it.
+///
+/// That lookup is hoisted because `md_software` is a small shared lookup table,
+/// not part of this simulation's atomic unit, and every importer of a given
+/// software touches the same row. Resolved inside the transaction, the row lock
+/// it takes was held until the whole import committed (~60-75 s), so concurrent
+/// importers of the same software ran strictly one at a time -- the 2026-08-22
+/// serialisation, where `--ingest-jobs 8` had an effective concurrency of 1.
+/// Out here the lock lives for one statement.
+///
+/// The trade: a *newly created* software row now survives a failed import,
+/// where before it rolled back. That is harmless -- an unreferenced lookup row,
+/// which the retry reuses -- and is why this is the only step outside.
 pub fn import_simulation(
     conn: &mut PgConnection,
     sim: &ExportSimulation,
     opts: &ImportOpts,
 ) -> Result<i64> {
+    let software_id = find_or_create_software(conn, sim)?;
+
     conn.transaction(|conn| {
-        let sim_id = upsert_simulation(conn, sim, opts)?;
+        let sim_id = upsert_simulation(conn, sim, opts, software_id)?;
         let mdrepo_id = format!("MDR{sim_id:08}");
         debug!("Importing {mdrepo_id}");
 
@@ -129,9 +147,9 @@ fn upsert_simulation(
     conn: &mut PgConnection,
     sim: &ExportSimulation,
     opts: &ImportOpts,
+    software_id: i64,
 ) -> Result<i64> {
     let user_id = lead_contributor_id(conn, &sim.lead_contributor_orcid)?;
-    let software_id = find_or_create_software(conn, sim)?;
 
     let mut sim_id = opts.reprocess_simulation_id.map(|id| id as i64);
 

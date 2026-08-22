@@ -1238,7 +1238,29 @@ pub fn upsert_software(
     new: NewSoftware,
 ) -> QueryResult<Software> {
     use diesel::upsert::excluded;
+    use diesel::{OptionalExtension, PgExpressionMethods};
 
+    // Fast path: the row almost always exists, and SELECT neither locks it nor
+    // fires triggers. The DO UPDATE arm below is a *self-assignment* of `name`,
+    // which sounds free but is not: `trg_software_search_text` is defined AFTER
+    // UPDATE OF name, and Postgres fires column triggers on the column being in
+    // the SET list, not on the value changing. So every upsert of an existing
+    // row re-ran that trigger, which loops over every md_simulation sharing the
+    // software and rewrites its search_text -- 19,943 row updates against a
+    // 19 GB table per import for ('AMBER','2020'). See the 2026-08-22 incident.
+    if let Some(found) = md_software::table
+        .filter(md_software::name.eq(&new.name))
+        // IS NOT DISTINCT FROM, so a NULL version matches a NULL version
+        .filter(md_software::version.is_not_distinct_from(&new.version))
+        .select(Software::as_select())
+        .first(conn)
+        .optional()?
+    {
+        return Ok(found);
+    }
+
+    // Slow path: first sighting of this (name, version). The trigger may fire
+    // here, but a software row this new has no simulations pointing at it yet.
     diesel::insert_into(md_software::table)
         .values(&new)
         .on_conflict((md_software::name, md_software::version))
