@@ -155,7 +155,10 @@ unmodified since 2026-07-21, the day the port shipped.
   and the never-fixed `{"Cl": "Cl+"}` rename, which the Rust importer corrects
   to `Cl-`. Nothing was carried over.
 - Side effect worth knowing: this removes one of the raw-SQL writers to
-  `md_processed_file`. The ones left are `utils/python/rename_preview.py` and
-  `utils/python/resync_processed_file_checksums.py` — which is why a database
-  trigger, not a change to the Rust `ProcessedFileUpdate`, is the right way to
-  maintain a per-row `updated_at` if that column is added.
+  `md_processed_file`. `utils/python/rename_preview.py` went the same day (a
+  completed one-off: 0 `preview.png` rows remain), leaving
+  `utils/python/resync_processed_file_checksums.py` as the only one. That is
+  still why a database trigger, not a change to the Rust `ProcessedFileUpdate`,
+  is the right way to maintain a per-row `updated_at` if that column is added —
+  one raw-SQL writer is enough to defeat a Rust-side implementation, and the
+  Django admin can write these rows too.
