@@ -135,20 +135,27 @@ runs automatically today).
 
 ---
 
-## Task F — retire `import_preprocessed.py`
+## Task F — retire `import_preprocessed.py`  (DONE 2026-08-24)
 
 The Rust importer replaced it in production on 2026-07-21 (`process.rs` no longer
 shells out; the deployed `mdr-process` has no reference to the script). Parity was
 confirmed against staging simulation 80 across a fresh import, a reprocess, and a
 reprocess with `--replace-original-files`.
 
-What is left is deleting `simulation-processing/python/import_preprocessed.py` and
-whatever invokes it. Before doing so:
-- Confirm nothing else still calls it — it is also still being run by hand on a
-  separate machine for imports, which is why it is still on disk.
-- The other copy, `utils/python/misato/import_preprocessed.py`, has no solute
-  rename table and looks unrelated; check before touching it.
-- Two fixes landed in the script after the port, and both die with it:
+**Deleted 2026-08-24**, `simulation-processing` `f7cef88`. The condition that had
+kept it on disk — that it was still being run by hand for imports on the pushing
+host — no longer holds; Ken confirmed that on 2026-08-24. Nothing in any repo
+called it: not `process.rs`, not the crontab, not packaging or docs. It had been
+unmodified since 2026-07-21, the day the port shipped.
+
+- `utils/python/misato/import_preprocessed.py` is a **different** script (873
+  lines, no solute rename table) and was deliberately left alone.
+- Two fixes died with it, noted so neither later looks like a regression:
   `c802dac` (the `is_coarse_graing` key that reset the flag on every reprocess)
-  and the still-unfixed `{"Cl": "Cl+"}` rename, which the Rust importer corrects
-  to `Cl-`. Nothing to carry over — noted so neither looks like a regression.
+  and the never-fixed `{"Cl": "Cl+"}` rename, which the Rust importer corrects
+  to `Cl-`. Nothing was carried over.
+- Side effect worth knowing: this removes one of the raw-SQL writers to
+  `md_processed_file`. The ones left are `utils/python/rename_preview.py` and
+  `utils/python/resync_processed_file_checksums.py` — which is why a database
+  trigger, not a change to the Rust `ProcessedFileUpdate`, is the right way to
+  maintain a per-row `updated_at` if that column is added.
