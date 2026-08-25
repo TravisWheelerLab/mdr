@@ -34,12 +34,33 @@ pub fn generate(args: &GenArgs) -> Result<Meta> {
         .clone()
         .map_or(env::current_dir()?, |val| PathBuf::from(&val));
 
+    // main.rs's open_outfile() creates --outfile before calling generate(),
+    // and refuses to run at all if that path already existed -- so by the
+    // time this scan runs, a fresh, empty --outfile is guaranteed to be on
+    // disk. If it's inside `dir`, exclude it: without this, gen would list
+    // its own not-yet-written output as one of the directory's additional
+    // files, which mdr-process's import only avoids duplicating on because
+    // it dedupes original_files by md5 (see process.rs collect_original_files)
+    // -- fine at import time, but wrong for `gen` to produce in the first
+    // place. "-" means stdout; nothing on disk to exclude.
+    let outfile_path = if args.outfile == "-" {
+        None
+    } else {
+        fs::canonicalize(&args.outfile).ok()
+    };
+
     let mut files = vec![];
     for entry in fs::read_dir(&dir)? {
         let entry = entry?;
         let path = entry.path();
         if !path.is_file() {
             continue;
+        }
+
+        if let Some(outfile_path) = &outfile_path {
+            if path.canonicalize()? == *outfile_path {
+                continue;
+            }
         }
 
         let file_name = path
@@ -312,6 +333,37 @@ mod tests {
         assert_eq!(meta.structure_file_name, "sim.gro");
         assert_eq!(meta.topology_file_name, "sim.top");
         assert_eq!(meta.trajectory_file_names, vec!["sim.xtc".to_string()]);
+    }
+
+    #[test]
+    fn generate_excludes_its_own_outfile_from_additional_files() {
+        // main.rs's open_outfile() creates --outfile before calling
+        // generate() -- simulate that here rather than going through
+        // main.rs, since this is a unit test of generate() alone. Without
+        // the exclusion, writing into the same directory being scanned
+        // would list the not-yet-written output file as one of its own
+        // additional files.
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("sim.gro"), b"structure").unwrap();
+        fs::write(dir.path().join("sim.top"), b"topology").unwrap();
+        fs::write(dir.path().join("sim.xtc"), b"trajectory").unwrap();
+        fs::write(dir.path().join("README.txt"), b"notes").unwrap();
+
+        let outfile = dir.path().join("mdrepo-metadata.toml");
+        fs::write(&outfile, b"").unwrap();
+
+        let mut args = gen_args("GROMACS", Some(dir.path()));
+        args.outfile = outfile.to_string_lossy().to_string();
+
+        let meta = generate(&args).unwrap();
+        let names: Vec<&str> = meta
+            .additional_files
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|f| f.file_name.as_str())
+            .collect();
+        assert_eq!(names, vec!["README.txt"]);
     }
 
     #[test]
