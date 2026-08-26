@@ -923,6 +923,13 @@ mod proptest_tests {
             );
         }
 
+        #[test]
+        fn invalid_doi_fails_regex(s in "[a-zA-Z]{5,15}") {
+            // No "10.<digits>/" prefix at all, so this can never match --
+            // guaranteed invalid by construction, not by exclusion.
+            prop_assert!(!constants::DOI_REGEX.is_match(&s));
+        }
+
         // --- Range: temperature_kelvin ---
 
         #[test]
@@ -969,6 +976,31 @@ mod proptest_tests {
             prop_assert!(has_error, "Expected timestep error for timestep={timestep}");
         }
 
+        // --- Choice: Water model ---
+
+        #[test]
+        fn valid_water_model_passes(
+            model in proptest::sample::select(constants::VALID_WATER_MODEL),
+        ) {
+            let water = Water {
+                model: model.to_string(),
+                density_kg_m3: 1000.0,
+            };
+            prop_assert!(water.validate().is_ok(), "Model '{model}' should be valid");
+        }
+
+        #[test]
+        fn invalid_water_model_fails(s in "[a-zA-Z]{10,20}") {
+            // Guaranteed not in VALID_WATER_MODEL by construction: every
+            // multi-word/versioned entry contains a space, slash, hyphen, or
+            // digit, and the longest pure-letter entry ("iAMOEBA") is 7 chars.
+            let water = Water {
+                model: s.clone(),
+                density_kg_m3: 1000.0,
+            };
+            prop_assert!(water.validate().is_err(), "Model '{s}' should be invalid");
+        }
+
         // --- Range: Water density ---
 
         #[test]
@@ -990,6 +1022,31 @@ mod proptest_tests {
                 density_kg_m3: density,
             };
             prop_assert!(water.validate().is_err());
+        }
+
+        // --- Choice: Solute name ---
+
+        #[test]
+        fn valid_solute_name_passes(
+            name in proptest::sample::select(constants::VALID_SOLUTE_NAME),
+        ) {
+            let solute = Solute {
+                name: name.to_string(),
+                concentration_mol_liter: 0.15,
+            };
+            prop_assert!(solute.validate().is_ok(), "Name '{name}' should be valid");
+        }
+
+        #[test]
+        fn invalid_solute_name_fails(s in "[a-zA-Z]{6,20}") {
+            // Guaranteed not in VALID_SOLUTE_NAME by construction: the only
+            // multi-char entry is "Phosphoric acid" (has a space), and the
+            // longest pure-letter entry ("Urea") is 4 chars.
+            let solute = Solute {
+                name: s.clone(),
+                concentration_mol_liter: 0.15,
+            };
+            prop_assert!(solute.validate().is_err(), "Name '{s}' should be invalid");
         }
 
         // --- Range: Solute concentration ---
@@ -1315,6 +1372,7 @@ mod tests {
             r#"additional_files[1].description: value " " invalid"#,
             r#"additional_files[1].file_name: value " " invalid"#,
             r#"additional_files[1].file_type: value " " invalid"#,
+            r#"collections: value ["   "] invalid"#,
             r#"contributors[1].email: value "alex" invalid"#,
             r#"contributors[1].orcid: value "0000-2819-749X" invalid"#,
             r#"dois: value ["1038/s43588-024-00627-2"] invalid"#,
@@ -1335,6 +1393,7 @@ mod tests {
             r#"toml_version: value 4 must be = 2"#,
             r#"topology_file_name: filename " " is missing extension"#,
             r#"trajectory_file_names[1]: filename " " is missing extension"#,
+            r#"uniprot_ids: value ["P04637","Q9Y5S2","   "] invalid"#,
             r#"water.density_kg_m3: value 1000000.0 must be >= 900.0 and <= 1100.0"#,
             concat!(
                 r#"water.model: value "XYZ" invalid, choose from AMOEBA, BF, BK3, BMW, "#,

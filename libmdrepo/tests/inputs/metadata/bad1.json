@@ -30,7 +30,11 @@
   "pdb_id": "5am",
   "uniprot_ids": [
     "P04637",
-    "Q9Y5S2"
+    "Q9Y5S2",
+    "   "
+  ],
+  "collections": [
+    "   "
   ],
   "water": {
     "model": "XYZ",
