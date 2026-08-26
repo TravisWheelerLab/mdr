@@ -198,6 +198,38 @@ fn gen_gromacs() -> Result<()> {
 }
 
 // --------------------------------------------------
+// End-to-end regression for the bug generate.rs's unit test simulates:
+// this drives the real binary exactly as the docs' worked example does --
+// `-o` pointed inside the `-d` directory -- so it goes through main.rs's
+// open_outfile() (which creates an empty --outfile *before* generate()
+// scans the directory) rather than pre-creating the file by hand.
+#[test]
+fn gen_excludes_own_outfile_end_to_end() -> Result<()> {
+    let tmp_dir = tempfile::tempdir()?;
+    for entry in fs::read_dir(GEN_INPUT_ROOT)? {
+        let entry = entry?;
+        fs::copy(entry.path(), tmp_dir.path().join(entry.file_name()))?;
+    }
+
+    let dir_arg = tmp_dir.path().to_string_lossy().to_string();
+    let outfile = tmp_dir.path().join("mdrepo-metadata.toml");
+    let outfile_arg = outfile.to_string_lossy().to_string();
+
+    Command::cargo_bin(PRG)?
+        .args(["gen", "-s", "GROMACS", "-d", &dir_arg, "-o", &outfile_arg])
+        .assert()
+        .success();
+
+    let generated = fs::read_to_string(&outfile)?;
+    assert!(!generated.contains("mdrepo-metadata.toml"));
+    assert!(generated.contains(r#"file_name = "add1.txt""#));
+    assert!(generated.contains(r#"file_name = "add2.cpt""#));
+    assert!(generated.contains(r#"file_name = "add2.xyz""#));
+
+    Ok(())
+}
+
+// --------------------------------------------------
 // clap validates --software against VALID_SOFTWARE itself (see
 // PossibleValuesParser in types.rs), so an unknown engine never reaches
 // generate() at all -- this is caught before the directory is even read.
