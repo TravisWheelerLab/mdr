@@ -333,6 +333,8 @@ impl MetaV1 {
             dois: None,
             is_embargoed: None,
             uniprot_ids: non_empty(uniprot_ids),
+            // v1 had no notion of collections either -- nothing to migrate.
+            collections: None,
             water,
             ligands: non_empty(ligands),
             solutes: non_empty(solutes),

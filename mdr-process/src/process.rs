@@ -1169,6 +1169,7 @@ pub fn make_import_json(
         sampling_frequency_ps: args.meta.sampling_frequency_ps,
         integration_timestep_fs: args.meta.integration_timestep_fs,
         external_links: args.meta.external_links.unwrap_or_default(),
+        collections: args.meta.collections.unwrap_or_default(),
         forcefield: args.meta.forcefield,
         forcefield_comments: args.meta.forcefield_comments,
         protonation_method: args.meta.protonation_method,

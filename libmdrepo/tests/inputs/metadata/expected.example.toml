@@ -20,6 +20,7 @@ uniprot_ids = [
     "A0A0H2UWN8",
     "S8G8I1",
 ]
+collections = ["ATLAS"]
 dois = ["10.1017/j.str.2019.08.032"]
 is_embargoed = true
 

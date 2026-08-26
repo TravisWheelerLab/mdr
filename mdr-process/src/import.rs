@@ -131,6 +131,15 @@ pub fn import_simulation(
         for uniprot in &sim.uniprots {
             upsert_uniprot(conn, sim_id, uniprot)?;
         }
+        if !sim.collections.is_empty() {
+            let owner_user_id = lead_contributor_id(conn, &sim.lead_contributor_orcid)?
+                .ok_or_else(|| {
+                    anyhow!("collections require a resolvable lead_contributor")
+                })?;
+            for name in &sim.collections {
+                upsert_collection(conn, sim_id, owner_user_id, name)?;
+            }
+        }
         if let Some(pdb) = &sim.pdb {
             upsert_pdb(conn, sim_id, pdb)?;
         }
@@ -650,6 +659,40 @@ fn upsert_uniprot(
         NewSimulationUniprot {
             simulation_id: sim_id,
             uniprot_id: uniprot_pk,
+        },
+    )?
+    .id)
+}
+
+// --------------------------------------------------
+/// Find or create the (owner, name) collection, then link it to the
+/// simulation. Mirrors `upsert_uniprot`'s shape, but the identity row is
+/// scoped per-owner rather than shared globally -- see `ops::upsert_collection`.
+fn upsert_collection(
+    conn: &mut PgConnection,
+    sim_id: i64,
+    owner_user_id: i64,
+    name: &str,
+) -> Result<i64> {
+    let collection_pk = ops::upsert_collection(
+        conn,
+        NewCollection {
+            user_id: owner_user_id,
+            name: name.to_string(),
+            description: None,
+        },
+    )?
+    .id;
+
+    if let Some(id) = ops::find_simulation_collection_id(conn, sim_id, collection_pk)? {
+        return Ok(id);
+    }
+
+    Ok(ops::insert_simulation_collection(
+        conn,
+        NewSimulationCollection {
+            simulation_id: sim_id,
+            collection_id: collection_pk,
         },
     )?
     .id)

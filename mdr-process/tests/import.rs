@@ -111,6 +111,7 @@ fn base_sim(key: &str, orcid: &str) -> ExportSimulation {
         pdb: None,
         uniprots: vec![],
         external_links: vec![],
+        collections: vec![],
         forcefield: None,
         forcefield_comments: None,
         protonation_method: None,
@@ -197,6 +198,7 @@ fn import_new_simulation_creates_all_related_rows() {
             pages: None,
             doi: None,
         }],
+        collections: vec!["ATLAS-importtest".into(), "GPCR-MD-importtest".into()],
         ..base_sim("new", orcid)
     };
 
@@ -260,6 +262,23 @@ fn import_new_simulation_creates_all_related_rows() {
             .unwrap()
             .is_some()
     );
+
+    for name in ["ATLAS-importtest", "GPCR-MD-importtest"] {
+        let (_, found) =
+            ops::list_collections(&mut c, Some(name.to_string()), true, None, None)
+                .unwrap();
+        let collection = found
+            .into_iter()
+            .find(|c| c.name == name)
+            .unwrap_or_else(|| panic!("collection {name} should have been created"));
+        assert_eq!(collection.user_id, user_id, "owned by the lead contributor");
+        assert!(
+            ops::find_simulation_collection_id(&mut c, sim_id, collection.id)
+                .unwrap()
+                .is_some(),
+            "collection {name} should be linked to the simulation"
+        );
+    }
 }
 
 #[test]
@@ -285,6 +304,7 @@ fn import_same_alias_twice_is_idempotent_not_duplicated() {
             name: "IdempotentLigand".into(),
             smiles: "CC".into(),
         }],
+        collections: vec!["ATLAS-idempotent".into()],
         ..base_sim("idempotent", orcid)
     };
 
@@ -314,6 +334,25 @@ fn import_same_alias_twice_is_idempotent_not_duplicated() {
 
     let ligand_id = ops::find_ligand_id(&mut c, first_id, "IdempotentLigand").unwrap();
     assert!(ligand_id.is_some());
+
+    // Same (user_id, name): the second import must resolve to the same
+    // md_collection row, not error on the unique constraint or duplicate the
+    // md_simulation_collection link.
+    let (count, found) = ops::list_collections(
+        &mut c,
+        Some("ATLAS-idempotent".to_string()),
+        true,
+        None,
+        None,
+    )
+    .unwrap();
+    assert_eq!(count, 1, "exactly one Collection row, not two");
+    let collection_id = found[0].id;
+    assert!(
+        ops::find_simulation_collection_id(&mut c, first_id, collection_id)
+            .unwrap()
+            .is_some()
+    );
 }
 
 #[test]

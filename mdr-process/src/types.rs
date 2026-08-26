@@ -518,6 +518,9 @@ pub struct ExportSimulation {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub external_links: Vec<metadata::ExternalLink>,
 
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub collections: Vec<String>,
+
     #[serde(skip_serializing_if = "Option::is_none")]
     pub forcefield: Option<String>,
 

@@ -8,6 +8,43 @@ use uuid::Uuid;
 
 use crate::schema::*;
 
+// ── md_collection ─────────────────────────────────────────────────────────────
+
+#[derive(
+    Debug,
+    Queryable,
+    Selectable,
+    Identifiable,
+    Associations,
+    Serialize,
+    Deserialize,
+    ToSchema,
+)]
+#[diesel(table_name = md_collection)]
+#[diesel(belongs_to(User))]
+pub struct Collection {
+    pub id: i64,
+    pub name: String,
+    pub description: Option<String>,
+    pub user_id: i64,
+}
+
+#[derive(Debug, Insertable, Deserialize)]
+#[diesel(table_name = md_collection)]
+pub struct NewCollection {
+    pub name: String,
+    pub description: Option<String>,
+    pub user_id: i64,
+}
+
+#[derive(Debug, AsChangeset, Default, Deserialize)]
+#[diesel(table_name = md_collection)]
+pub struct CollectionUpdate {
+    pub name: Option<String>,
+    pub description: Option<Option<String>>,
+    pub user_id: Option<i64>,
+}
+
 // ── md_contribution ───────────────────────────────────────────────────────────
 
 #[derive(
@@ -579,6 +616,41 @@ pub struct NewSimulationPub {
 pub struct SimulationPubUpdate {
     pub simulation_id: Option<i64>,
     pub pub_id: Option<i64>,
+}
+
+// ── md_simulation_collection ──────────────────────────────────────────────────
+
+#[derive(
+    Debug,
+    Queryable,
+    Selectable,
+    Identifiable,
+    Associations,
+    Serialize,
+    Deserialize,
+    ToSchema,
+)]
+#[diesel(table_name = md_simulation_collection)]
+#[diesel(belongs_to(Simulation))]
+#[diesel(belongs_to(Collection))]
+pub struct SimulationCollection {
+    pub id: i64,
+    pub simulation_id: i64,
+    pub collection_id: i64,
+}
+
+#[derive(Debug, Insertable, Deserialize)]
+#[diesel(table_name = md_simulation_collection)]
+pub struct NewSimulationCollection {
+    pub simulation_id: i64,
+    pub collection_id: i64,
+}
+
+#[derive(Debug, AsChangeset, Default, Deserialize)]
+#[diesel(table_name = md_simulation_collection)]
+pub struct SimulationCollectionUpdate {
+    pub simulation_id: Option<i64>,
+    pub collection_id: Option<i64>,
 }
 
 // ── md_replicate_group ────────────────────────────────────────────────────────

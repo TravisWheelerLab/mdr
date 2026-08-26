@@ -103,6 +103,10 @@ pub struct Meta {
     #[validate(custom(function = "validate_uniprot_ids"))]
     pub uniprot_ids: Option<Vec<String>>,
 
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[validate(custom(function = "validate_collections"))]
+    pub collections: Option<Vec<String>>,
+
     #[validate(nested)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub water: Option<Water>,
@@ -478,6 +482,7 @@ impl Meta {
             protonation_method: Some("PropKa".to_string()),
             pdb_id: Some("5emo".to_string()),
             uniprot_ids: Some(vec!["A0A0H2UWN8".to_string(), "S8G8I1".to_string()]),
+            collections: Some(vec!["ATLAS".to_string()]),
             water: Some(Water {
                 model: "TIP3P".to_string(),
                 density_kg_m3: 986.,
@@ -534,6 +539,7 @@ impl Meta {
             protonation_method: None,
             pdb_id: None,
             uniprot_ids: None,
+            collections: None,
             water: None,
             ligands: None,
             solutes: None,
@@ -733,6 +739,16 @@ fn validate_uniprot_ids(ids: &[String]) -> Result<(), ValidationError> {
         .all(|val| constants::NOT_WHITESPACE_REGEX.is_match(val))
     {
         return Err(ValidationError::new("uniprot_id"));
+    }
+    Ok(())
+}
+
+fn validate_collections(names: &[String]) -> Result<(), ValidationError> {
+    if !names
+        .iter()
+        .all(|val| constants::NOT_WHITESPACE_REGEX.is_match(val))
+    {
+        return Err(ValidationError::new("collection"));
     }
     Ok(())
 }

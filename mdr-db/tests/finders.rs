@@ -618,6 +618,73 @@ fn upsert_uniprot_is_idempotent_on_the_accession() {
 }
 
 #[test]
+fn upsert_collection_is_idempotent_on_user_and_name() {
+    // Unlike upsert_uniprot, a second upsert of the same (user_id, name) must
+    // NOT overwrite description -- the fast path returns the existing row
+    // untouched, and even the slow path's ON CONFLICT only self-assigns name.
+    let mut c = conn_or_skip!();
+    let user_id = seed_user(&mut c, "collection-upsert-test");
+
+    let first = ops::upsert_collection(
+        &mut c,
+        NewCollection {
+            user_id,
+            name: "ATLAS-upserttest".into(),
+            description: Some("first description".into()),
+        },
+    )
+    .unwrap();
+
+    let second = ops::upsert_collection(
+        &mut c,
+        NewCollection {
+            user_id,
+            name: "ATLAS-upserttest".into(),
+            description: Some("second description -- must be ignored".into()),
+        },
+    )
+    .unwrap();
+
+    // Same row, not a second one...
+    assert_eq!(first.id, second.id);
+
+    // ...and description is NOT refreshed, unlike uniprot's fields above.
+    assert_eq!(second.description, Some("first description".to_string()));
+}
+
+#[test]
+fn upsert_collection_scopes_the_same_name_per_user() {
+    // The chosen design is per-owner uniqueness, not global-by-name like
+    // uniprot_id/pdb_id: two different users' collections named identically
+    // must be two different rows.
+    let mut c = conn_or_skip!();
+    let user_a = seed_user(&mut c, "collection-scope-a");
+    let user_b = seed_user(&mut c, "collection-scope-b");
+
+    let a = ops::upsert_collection(
+        &mut c,
+        NewCollection {
+            user_id: user_a,
+            name: "GPCR-MD".into(),
+            description: None,
+        },
+    )
+    .unwrap();
+
+    let b = ops::upsert_collection(
+        &mut c,
+        NewCollection {
+            user_id: user_b,
+            name: "GPCR-MD".into(),
+            description: None,
+        },
+    )
+    .unwrap();
+
+    assert_ne!(a.id, b.id);
+}
+
+#[test]
 fn upsert_software_is_idempotent_on_name_and_version() {
     // The one that had already done damage: md_software had no unique
     // constraint, so the losing thread inserted a duplicate silently rather

@@ -8,6 +8,16 @@
 
 diesel::table! {
     use diesel::sql_types::*;
+    md_collection (id) {
+        id -> Int8,
+        name -> Varchar,
+        description -> Nullable<Text>,
+        user_id -> Int8,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::*;
     md_contribution (id) {
         id -> Int8,
         email -> Nullable<Varchar>,
@@ -169,6 +179,15 @@ diesel::table! {
         id -> Int8,
         simulation_id -> Int8,
         pub_id -> Int8,
+    }
+}
+
+diesel::table! {
+    use diesel::sql_types::*;
+    md_simulation_collection (id) {
+        id -> Int8,
+        simulation_id -> Int8,
+        collection_id -> Int8,
     }
 }
 
@@ -363,6 +382,7 @@ diesel::table! {
 }
 
 diesel::allow_tables_to_appear_in_same_query!(
+    md_collection,
     md_contribution,
     md_external_link,
     md_feature_switch,
@@ -375,6 +395,7 @@ diesel::allow_tables_to_appear_in_same_query!(
     md_pub,
     md_replicate,
     md_simulation,
+    md_simulation_collection,
     md_simulation_pub,
     md_replicate_group,
     md_simulation_uniprot,

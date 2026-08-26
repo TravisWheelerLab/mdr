@@ -23,6 +23,9 @@
     "A0A0H2UWN8",
     "S8G8I1"
   ],
+  "collections": [
+    "ATLAS"
+  ],
   "water": {
     "model": "TIP3P",
     "density_kg_m3": 986.0

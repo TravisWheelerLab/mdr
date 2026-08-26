@@ -14,6 +14,103 @@ fn limit(n: Option<i64>) -> i64 {
     n.unwrap_or(DEFAULT_LIMIT).min(MAX_LIMIT)
 }
 
+// ── md_collection ────────────────────────────────────────────────────────────
+
+fn collection_query(search: Option<&str>) -> md_collection::BoxedQuery<'static, Pg> {
+    use crate::schema::md_collection::dsl::*;
+    let mut q = md_collection.into_boxed();
+    if let Some(t) = search {
+        q = q.filter(name.ilike(format!("%{t}%")));
+    }
+    q
+}
+
+pub fn list_collections(
+    conn: &mut PgConnection,
+    search: Option<String>,
+    all: bool,
+    lim: Option<i64>,
+    offset: Option<i64>,
+) -> QueryResult<(i64, Vec<Collection>)> {
+    use crate::schema::md_collection::dsl::id;
+    let count = collection_query(search.as_deref())
+        .select(count_star())
+        .first(conn)?;
+    let mut q = collection_query(search.as_deref())
+        .order(id.desc())
+        .select(Collection::as_select());
+    if !all {
+        q = q.limit(limit(lim)).offset(offset.unwrap_or(0));
+    }
+    let results = q.load(conn)?;
+    Ok((count, results))
+}
+
+pub fn get_collection(conn: &mut PgConnection, rid: i64) -> QueryResult<Collection> {
+    md_collection::table
+        .find(rid)
+        .select(Collection::as_select())
+        .first(conn)
+}
+
+pub fn insert_collection(
+    conn: &mut PgConnection,
+    new: NewCollection,
+) -> QueryResult<Collection> {
+    diesel::insert_into(md_collection::table)
+        .values(&new)
+        .returning(Collection::as_returning())
+        .get_result(conn)
+}
+
+pub fn update_collection(
+    conn: &mut PgConnection,
+    rid: i64,
+    cs: CollectionUpdate,
+) -> QueryResult<Collection> {
+    diesel::update(md_collection::table.find(rid))
+        .set(&cs)
+        .returning(Collection::as_returning())
+        .get_result(conn)
+}
+
+pub fn delete_collection(conn: &mut PgConnection, rid: i64) -> QueryResult<usize> {
+    diesel::delete(md_collection::table.find(rid)).execute(conn)
+}
+
+/// Find or create the `(user_id, name)` collection, without touching its
+/// `description`. Fast path (a plain `SELECT`) avoids taking a write lock --
+/// and re-firing any future trigger on the row -- for the common case where
+/// the collection already exists; only a brand-new `(user_id, name)` pair
+/// falls through to the slow path's self-assigning `ON CONFLICT DO UPDATE`.
+/// See `upsert_software` for why that self-assignment, rather than a
+/// SELECT-only insert, is still the right shape for the race-safety net.
+pub fn upsert_collection(
+    conn: &mut PgConnection,
+    new: NewCollection,
+) -> QueryResult<Collection> {
+    use diesel::OptionalExtension;
+    use diesel::upsert::excluded;
+
+    if let Some(found) = md_collection::table
+        .filter(md_collection::user_id.eq(new.user_id))
+        .filter(md_collection::name.eq(&new.name))
+        .select(Collection::as_select())
+        .first(conn)
+        .optional()?
+    {
+        return Ok(found);
+    }
+
+    diesel::insert_into(md_collection::table)
+        .values(&new)
+        .on_conflict((md_collection::user_id, md_collection::name))
+        .do_update()
+        .set(md_collection::name.eq(excluded(md_collection::name)))
+        .returning(Collection::as_returning())
+        .get_result(conn)
+}
+
 // ── md_contribution ───────────────────────────────────────────────────────────
 
 fn contribution_query(
@@ -1010,6 +1107,100 @@ pub fn update_simulation_pub(
 
 pub fn delete_simulation_pub(conn: &mut PgConnection, rid: i64) -> QueryResult<usize> {
     diesel::delete(md_simulation_pub::table.find(rid)).execute(conn)
+}
+
+// ── md_simulation_collection ────────────────────────────────────────────────────
+
+fn simulation_collection_query(
+    sim_id: Option<i64>,
+    cid: Option<i64>,
+) -> md_simulation_collection::BoxedQuery<'static, Pg> {
+    use crate::schema::md_simulation_collection::dsl::*;
+    let mut q = md_simulation_collection.into_boxed();
+    if let Some(s) = sim_id {
+        q = q.filter(simulation_id.eq(s));
+    }
+    if let Some(c) = cid {
+        q = q.filter(collection_id.eq(c));
+    }
+    q
+}
+
+pub fn list_simulation_collections(
+    conn: &mut PgConnection,
+    sim_id: Option<i64>,
+    cid: Option<i64>,
+    all: bool,
+    lim: Option<i64>,
+    offset: Option<i64>,
+) -> QueryResult<(i64, Vec<SimulationCollection>)> {
+    use crate::schema::md_simulation_collection::dsl::id;
+    let count = simulation_collection_query(sim_id, cid)
+        .select(count_star())
+        .first(conn)?;
+    let mut q = simulation_collection_query(sim_id, cid)
+        .order(id.desc())
+        .select(SimulationCollection::as_select());
+    if !all {
+        q = q.limit(limit(lim)).offset(offset.unwrap_or(0));
+    }
+    let results = q.load(conn)?;
+    Ok((count, results))
+}
+
+pub fn get_simulation_collection(
+    conn: &mut PgConnection,
+    rid: i64,
+) -> QueryResult<SimulationCollection> {
+    md_simulation_collection::table
+        .find(rid)
+        .select(SimulationCollection::as_select())
+        .first(conn)
+}
+
+pub fn insert_simulation_collection(
+    conn: &mut PgConnection,
+    new: NewSimulationCollection,
+) -> QueryResult<SimulationCollection> {
+    diesel::insert_into(md_simulation_collection::table)
+        .values(&new)
+        .returning(SimulationCollection::as_returning())
+        .get_result(conn)
+}
+
+pub fn update_simulation_collection(
+    conn: &mut PgConnection,
+    rid: i64,
+    cs: SimulationCollectionUpdate,
+) -> QueryResult<SimulationCollection> {
+    diesel::update(md_simulation_collection::table.find(rid))
+        .set(&cs)
+        .returning(SimulationCollection::as_returning())
+        .get_result(conn)
+}
+
+pub fn delete_simulation_collection(
+    conn: &mut PgConnection,
+    rid: i64,
+) -> QueryResult<usize> {
+    diesel::delete(md_simulation_collection::table.find(rid)).execute(conn)
+}
+
+/// Existing `md_simulation_collection` link id for `(simulation_id,
+/// collection_id)`, so the importer doesn't create a duplicate link (mirrors
+/// `find_simulation_uniprot_id`).
+pub fn find_simulation_collection_id(
+    conn: &mut PgConnection,
+    sim_id: i64,
+    cid: i64,
+) -> QueryResult<Option<i64>> {
+    use crate::schema::md_simulation_collection::dsl::*;
+    md_simulation_collection
+        .filter(simulation_id.eq(sim_id))
+        .filter(collection_id.eq(cid))
+        .select(id)
+        .first::<i64>(conn)
+        .optional()
 }
 
 // ── md_replicate_group ────────────────────────────────────────────────────────

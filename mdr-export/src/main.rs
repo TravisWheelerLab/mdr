@@ -148,6 +148,12 @@ fn get_sim(conn: &mut PgConnection, sim_id: i64) -> Result<metadata::Meta> {
                 .to_string(),
         );
     }
+    let (_, sim2collection) =
+        ops::list_simulation_collections(conn, Some(sim_id), None, true, None, None)?;
+    let mut collections: Vec<String> = vec![];
+    for s2c in sim2collection {
+        collections.push(ops::get_collection(conn, s2c.collection_id)?.name);
+    }
 
     let water = match (&sim.water_type, &sim.water_density) {
         (Some(model), Some(density_kg_m3)) => Some(metadata::Water {
@@ -352,6 +358,11 @@ fn get_sim(conn: &mut PgConnection, sim_id: i64) -> Result<metadata::Meta> {
             None
         } else {
             Some(uniprot_ids)
+        },
+        collections: if collections.is_empty() {
+            None
+        } else {
+            Some(collections)
         },
         water,
         additional_files: if additional_files.is_empty() {
