@@ -16,6 +16,14 @@ jobs:
       - uses: taiki-e/create-gh-release-action@v1
         with:
           prefix: "v"
+          # Pulls the release note straight from the matching version
+          # heading in mdr-meta/CHANGELOG.md (write the entry before
+          # tagging, not after -- see that file's own header).
+          changelog: mdr-meta/CHANGELOG.md
+          # Don't fail the release if a tag is pushed with no matching
+          # changelog entry -- fall back to an empty body (same as before
+          # this changed) rather than blocking the release outright.
+          allow-missing-changelog: true
           # (required) GitHub token for creating GitHub Releases.
           token: ${{ secrets.GITHUB_TOKEN }}
 

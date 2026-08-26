@@ -1,0 +1,97 @@
+# Changelog
+
+Notable user-facing changes to `mdr-meta`. Each entry here becomes the
+GitHub release note for that version (see `.github/workflows/release.yml`)
+-- write it before tagging, not after.
+
+## 0.3.22
+
+### New: `collections`
+
+Metadata can now declare one or more named collections a simulation
+belongs to, via a new optional TOML key:
+
+```toml
+collections = ["ATLAS"]
+```
+
+- Optional -- omitting it changes nothing about existing metadata.
+- Each entry must be a non-empty, non-whitespace string; `check`, `gen`,
+  and `eg` validate and print it the same way they already do for
+  `uniprot_ids`.
+- `mdr-meta eg`'s full example output now includes a `collections` line.
+
+### Unchanged
+
+- Every other field, and `gen`'s directory-classification behavior, is
+  untouched.
+- `check`'s exit codes (`0`/`1`/`2`, see the 0.3.17 notes below) are
+  unchanged.
+
+## 0.3.21
+
+### Fixed
+
+`gen` no longer lists its own `--outfile` as one of the directory's
+`additional_files` when `--outfile` points inside the directory being
+scanned -- exactly what this page's own worked example does:
+
+```sh
+mdr-meta gen -d MDR00016593 -s GROMACS -o MDR00016593/mdrepo-metadata.toml
+```
+
+Previously, the freshly-created (empty) output file was picked up by the
+directory scan and listed as an additional file of its own metadata.
+
+## 0.3.17
+
+### Breaking change
+
+`mdr-meta check` used to exit `0` whether or not your metadata was valid.
+It reported problems only by printing them, so any script that tested the
+exit status treated a broken TOML as a good one.
+
+`check` now follows the same convention as `grep`:
+
+| Code | Meaning |
+|------|---------|
+| `0`  | Metadata is valid |
+| `1`  | Metadata is invalid; the findings are printed to stdout |
+| `2`  | The check could not run (usage error) |
+
+Checking several files at once exits `1` if **any** of them is invalid.
+A file that cannot be parsed or read counts as invalid, and the remaining
+files are still checked.
+
+### What you may need to change
+
+- Anything of the form `mdr-meta check meta.toml && upload` was always
+  proceeding to the upload. It now stops when the metadata is bad, which
+  is what it looked like it did all along.
+- A validation step in CI that has been quietly passing may now go red.
+  That is the point of the change, but expect it on submissions whose
+  metadata was already invalid.
+- If you need one script to work against both old and new builds, do not
+  branch on the exit code alone: treat **stdout as the verdict when the
+  code is `0` or `1`**, and only treat other codes as "the check never
+  ran". An older binary returns `0` with the findings on stdout, so
+  code-only logic will pass invalid metadata.
+
+### Also fixed
+
+- `mdr-meta check` with no filenames exited `0` -- a vacuous pass on
+  nothing at all. It is now a usage error.
+- A file that passed printed a stray blank line. Success is now silent,
+  so empty output means valid.
+
+### Other subcommands
+
+Errors raised by `eg`, `gen`, `to-json`, `to-toml` and `upgrade` now exit
+`2` instead of `1` -- for example `eg --outfile` pointed at a file that
+already exists. Their success behaviour and output are unchanged.
+
+### Unchanged
+
+- The wording and format of the findings `check` prints.
+- `--no-id` still suppresses the "Missing PDB and Uniprot IDs" note.
+- Ligand SMILES errors are still reported and are not suppressible.
