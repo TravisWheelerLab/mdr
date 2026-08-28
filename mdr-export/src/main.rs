@@ -236,8 +236,26 @@ fn get_sim(conn: &mut PgConnection, sim_id: i64) -> Result<metadata::Meta> {
         .map(|val| val.trajectory_file_name.to_string())
         .collect::<Vec<_>>();
 
+    // Two invariants, deliberately separate. The field emitted below is
+    // `replicates`, from md_replicate; the vector gathered from is_primary
+    // above is used for nothing else. Guarding only the latter is what let
+    // 19,902 simulations export `trajectory_file_names = []` in silence --
+    // every one had a primary Trajectory row, so the check passed, and every
+    // one had zero md_replicate rows, so the emitted list was empty. Meta
+    // declares `#[validate(length(min = 1))]` on the field, but nothing in
+    // this binary calls .validate(), so that declaration never ran.
+    //
+    // Do not fold these into one by exporting the is_primary vector instead.
+    // md_replicate is the correct source: a multi-replicate simulation has
+    // many trajectories and only the exemplar gets an md_uploaded_file row,
+    // the rest living inside trajectories.tar. The two sets differ by design
+    // on 47,252 simulations, so they cannot be cross-checked either.
     if trajectory_file_names.is_empty() {
-        bail!(r#""trajectory_file_names" is empty"#)
+        bail!("simulation has no primary Trajectory file")
+    }
+
+    if replicates.is_empty() {
+        bail!(r#"no md_replicate rows, so "trajectory_file_names" would be empty"#)
     }
 
     let (_, ligands_res) =
