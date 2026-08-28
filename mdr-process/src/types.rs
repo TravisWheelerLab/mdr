@@ -337,6 +337,17 @@ pub struct ProcessedTrajectory {
     /// default 1 ps/frame onto the output, so by the time anything measures
     /// full.xtc a fabricated spacing is indistinguishable from a real one.
     pub source_has_time_axis: Option<bool>,
+
+    /// Frame spacing in ps read straight out of the SOURCE trajectory's own
+    /// header, before conversion. `None` means it could not be recovered --
+    /// an unsupported source format, an unreadable header, or a run where the
+    /// converted files already existed and nothing opened the source.
+    ///
+    /// This is the only figure in the pipeline taken from what the submitter
+    /// actually wrote. Everything else is either their word for it
+    /// (`sampling_frequency_ps` in the metadata) or a measurement of a file
+    /// *we* generated, which reports whatever cpptraj stamped on it.
+    pub source_sampling_ps: Option<f64>,
     pub is_coarse_grained: bool,
 }
 

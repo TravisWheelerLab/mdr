@@ -44,6 +44,23 @@ const FS_PER_PS: f64 = 1000.0;
 const PS_PER_NS: f64 = 1000.0;
 const XTC_INFLATION_FACTOR: f64 = 1000.0;
 
+// ── nstxout plausibility band ─────────────────────────────────────────────────
+// Output steps per saved frame: frame spacing over integration timestep. Both
+// ends have been documented since the check was written, but only the ceiling
+// was ever enforced -- and the floor is the end a fabricated spacing trips.
+//
+// A frame saved every few hundred steps is not impossible in principle, but it
+// is not what the trajectories we ingest look like, and it *is* precisely what
+// cpptraj's invented 1 ps/frame yields against an ordinary timestep: nstxout
+// 500 at 2 fs, 250 at 4 fs. Enforcing the floor is how a real measurement gets
+// told apart from one that was never really a measurement.
+//
+// The floor is not sufficient on its own: 1 ps/frame against a 1 fs timestep
+// lands on exactly 1e3 and clears it. Recovering the spacing from the source
+// header (`source_sampling_ps`) is the actual fix; this is the net under it.
+const NSTXOUT_MIN: f64 = 1e3;
+const NSTXOUT_MAX: f64 = 1e7;
+
 // --------------------------------------------------
 pub fn process(args: &ProcessArgs) -> Result<ProcessResult> {
     debug!("{args:?}");
@@ -461,6 +478,7 @@ pub fn process_trajectory(args: ProcessTrajectoryArgs) -> Result<ProcessedTrajec
     // that finds the outputs already present never reads the source, so it
     // cannot know, and must not claim to.
     let mut source_has_time_axis: Option<bool> = None;
+    let mut source_sampling_ps: Option<f64> = None;
 
     if full_min_files.iter().all(|f| file_exists(f)) {
         debug!(
@@ -594,9 +612,13 @@ pub fn process_trajectory(args: ProcessTrajectoryArgs) -> Result<ProcessedTrajec
 
         // The wrapper reports what the SOURCE trajectory held, before this
         // conversion rewrote its timing. Read it here or not at all.
-        source_has_time_axis =
-            parse_time_axis_marker(&String::from_utf8_lossy(&output.stdout));
-        debug!("Source time axis: {source_has_time_axis:?}");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        source_has_time_axis = parse_time_axis_marker(&stdout);
+        source_sampling_ps = parse_sampling_marker(&stdout);
+        debug!(
+            "Source time axis: {source_has_time_axis:?}; \
+             source sampling: {source_sampling_ps:?} ps/frame"
+        );
     }
 
     let full_gro = trajectory_dir.join("full.gro");
@@ -646,6 +668,7 @@ pub fn process_trajectory(args: ProcessTrajectoryArgs) -> Result<ProcessedTrajec
         directory_name: trajectory_dir.to_string_lossy().to_string(),
         is_coarse_grained,
         source_has_time_axis,
+        source_sampling_ps,
     })
 }
 
@@ -1639,6 +1662,27 @@ fn parse_time_axis_marker(stdout: &str) -> Option<bool> {
 }
 
 // --------------------------------------------------
+/// Read the wrapper's `[mdrepo] source_sampling_ps=` line
+///
+/// The frame spacing the wrapper recovered from the source trajectory's own
+/// header. `None` when the marker is absent, says `unknown`, or does not parse
+/// -- all of which mean the same thing: nothing was recovered, so the callers
+/// below fall back to the declaration or the measurement.
+///
+/// A non-positive or non-finite value is rejected rather than trusted. It
+/// would divide through the duration arithmetic and produce a zero or NaN
+/// duration that looks like a real answer.
+fn parse_sampling_marker(stdout: &str) -> Option<f64> {
+    const MARKER: &str = "[mdrepo] source_sampling_ps=";
+    stdout
+        .lines()
+        .rev()
+        .find_map(|line| line.trim().strip_prefix(MARKER))
+        .and_then(|value| value.trim().parse::<f64>().ok())
+        .filter(|ps| ps.is_finite() && *ps > 0.)
+}
+
+// --------------------------------------------------
 pub fn get_duration(
     trajectories: &[ProcessedTrajectory],
     example_full_xtc: &Path,
@@ -1661,49 +1705,94 @@ pub fn get_duration(
         let mut total_duration_ps = 0.0;
         let mut sampling_frequency_ns = 0.0_f32;
         for traj in trajectories {
-            let (measured_ps, measured_ns, num_frames) =
-                measure_trajectory(&traj.full_xtc, integration_timestep_fs)?;
+            let measured = measure_trajectory(&traj.full_xtc, integration_timestep_fs)?;
+            let num_frames = measured.num_frames;
 
-            // What was measured is only trustworthy if the source had a time
-            // axis to begin with. When it did not, conversion stamped
-            // cpptraj's default 1 ps/frame onto full.xtc and `measured_ns` is
-            // that default wearing the costume of a measurement -- which is
+            // Frame spacing, in order of how much the source is entitled to be
+            // believed. What was *measured* comes last on purpose: it is taken
+            // from full.xtc, which conversion wrote, so it reports whatever
+            // cpptraj stamped rather than anything the submitter simulated.
+            // When the source carried no time axis that stamp is a default of
+            // 1 ps/frame wearing the costume of a measurement -- which is
             // exactly how MDR00048669 came to record 0.001 ns/frame and a
             // 5.61 ns duration, both a clean factor of ten too small, and sit
             // in the public record for a year looking authoritative.
-            let (duration_ps, sampling_ns) = match traj.source_has_time_axis {
-                Some(false) => {
-                    let declared = declared_sampling_ps.ok_or_else(|| {
-                        anyhow!(
-                            "{}: the source trajectory carries no time axis \
-                             and the metadata declares no \
-                             `sampling_frequency_ps`, so the frame spacing \
-                             cannot be established. Converting anyway would \
-                             record cpptraj's default of 1 ps per frame as \
-                             though it had been measured. Add \
-                             `sampling_frequency_ps` to mdrepo-metadata.toml \
-                             (the output frequency times the integration \
-                             timestep) and re-run.",
-                            traj.trajectory_file_name
-                        )
-                    })?;
+            let (duration_ps, sampling_ns) =
+                match (traj.source_sampling_ps, traj.source_has_time_axis) {
+                    // 1. Recovered from the source file's own header before
+                    //    conversion could overwrite it. The only branch that
+                    //    reads the timing the submitter actually produced, so
+                    //    it outranks both the declaration and the measurement.
+                    (Some(recovered), _) => {
+                        // Conversion is asked to stamp this same spacing onto
+                        // full.xtc, so the measurement should now agree. A
+                        // disagreement means the stamp did not take -- worth
+                        // saying out loud, but the header still wins.
+                        if (measured.sampling_frequency_ns as f64
+                            - recovered / PS_PER_NS)
+                            .abs()
+                            > f64::EPSILON.max(recovered / PS_PER_NS * 0.01)
+                        {
+                            debug!(
+                                "{}: source header says {recovered} ps/frame \
+                                 but full.xtc measures {} ns/frame; trusting \
+                                 the header",
+                                traj.trajectory_file_name,
+                                measured.sampling_frequency_ns
+                            );
+                        }
 
-                    // Spacing between frames, so the span is one interval
-                    // fewer than the frame count.
-                    let derived_ps = declared * (num_frames - 1.);
-                    debug!(
-                        "{}: no source time axis; using declared \
-                         {declared} ps/frame over {num_frames} frames",
-                        traj.trajectory_file_name
-                    );
-                    (derived_ps, round_dp(declared / PS_PER_NS, 3) as f32)
-                }
-                // True, or unknown. Unknown keeps today's behaviour on
-                // purpose: it means the report could not be read, not that
-                // the axis is absent, and failing on that would condemn
-                // directories over a parsing gap.
-                _ => (measured_ps, measured_ns),
-            };
+                        // Spacing between frames, so the span is one interval
+                        // fewer than the frame count.
+                        let derived_ps = recovered * (num_frames - 1.);
+                        debug!(
+                            "{}: using {recovered} ps/frame recovered from the \
+                             source header over {num_frames} frames",
+                            traj.trajectory_file_name
+                        );
+                        (derived_ps, round_dp(recovered / PS_PER_NS, 3) as f32)
+                    }
+                    // 2. The source demonstrably carries no time axis and we
+                    //    could not recover a spacing from it, so the metadata
+                    //    declaration is all that is left.
+                    (None, Some(false)) => {
+                        let declared = declared_sampling_ps.ok_or_else(|| {
+                            anyhow!(
+                                "{}: the source trajectory carries no time \
+                                 axis and the metadata declares no \
+                                 `sampling_frequency_ps`, so the frame spacing \
+                                 cannot be established. Converting anyway \
+                                 would record cpptraj's default of 1 ps per \
+                                 frame as though it had been measured. Add \
+                                 `sampling_frequency_ps` to \
+                                 mdrepo-metadata.toml (the output frequency \
+                                 times the integration timestep) and re-run.",
+                                traj.trajectory_file_name
+                            )
+                        })?;
+
+                        let derived_ps = declared * (num_frames - 1.);
+                        debug!(
+                            "{}: no source time axis; using declared \
+                             {declared} ps/frame over {num_frames} frames",
+                            traj.trajectory_file_name
+                        );
+                        (derived_ps, round_dp(declared / PS_PER_NS, 3) as f32)
+                    }
+                    // 3. True, or unknown. Unknown keeps today's behaviour on
+                    //    purpose: it means the report could not be read, not
+                    //    that the axis is absent, and failing on that would
+                    //    condemn directories over a parsing gap. The nstxout
+                    //    floor is what catches a fabricated spacing here.
+                    (None, _) => {
+                        validate_measured_spacing(
+                            &traj.trajectory_file_name,
+                            &measured,
+                            integration_timestep_fs,
+                        )?;
+                        (measured.duration_ps, measured.sampling_frequency_ns)
+                    }
+                };
 
             total_duration_ps += duration_ps;
             if traj.full_xtc == example_full_xtc {
@@ -1853,13 +1942,28 @@ fn modal_gap_ps(times: &[f64]) -> Option<f64> {
     Some(winner[winner.len() / 2])
 }
 
-/// Measure one trajectory with `molly --times`, returning
-/// (duration_ps, sampling_frequency_ns, num_frames). Includes the 1000x
+/// What `molly --times` says about one converted trajectory.
+///
+/// `nstxout` rides along with the numbers it was derived from because whether
+/// the measurement may be believed is decided by the caller, not here: a
+/// directory that recovered its spacing from the source header, or declares
+/// one in its metadata, never consults these fields at all. Validating inside
+/// the measurement would condemn exactly those directories.
+struct Measurement {
+    duration_ps: f64,
+    sampling_frequency_ns: f32,
+    num_frames: f64,
+    /// Output steps per saved frame, against the declared integration
+    /// timestep. See [`NSTXOUT_MIN`] / [`validate_measured_spacing`].
+    nstxout: f64,
+}
+
+/// Measure one trajectory with `molly --times`. Includes the 1000x
 /// inflated-timestamp correction used historically.
 fn measure_trajectory(
     full_xtc: &Path,
     integration_timestep_fs: u32,
-) -> Result<(f64, f32, f64)> {
+) -> Result<Measurement> {
     let times = frame_times(full_xtc)?;
     let num_frames = times.len() as f64;
 
@@ -1886,18 +1990,20 @@ fn measure_trajectory(
     // using the integration timestep from metadata.
     let nstxout = sampling_ps / (integration_timestep_fs as f64 / FS_PER_PS);
 
-    // A reasonable nstxout is 1e3..1e7. If it's way too large
+    // A reasonable nstxout is NSTXOUT_MIN..NSTXOUT_MAX. If it's way too large
     // but dividing by 1000 fixes it, the XTC timestamps are
     // inflated by 1000x (a known issue with some MD engines).
-    if nstxout > 1e7 {
+    let mut nstxout = nstxout;
+    if nstxout > NSTXOUT_MAX {
         let corrected_nstxout = nstxout / XTC_INFLATION_FACTOR;
-        if (1e3..=1e7).contains(&corrected_nstxout) {
+        if (NSTXOUT_MIN..=NSTXOUT_MAX).contains(&corrected_nstxout) {
             debug!(
                 "XTC timestamps appear inflated by 1000x \
                      (nstxout={nstxout:.0}, corrected={corrected_nstxout:.0}). \
                      Applying correction."
             );
             duration_ps /= XTC_INFLATION_FACTOR;
+            nstxout = corrected_nstxout;
         } else {
             bail!(
                 "XTC timestamps look wrong (nstxout={nstxout:.0}) \
@@ -1909,7 +2015,44 @@ fn measure_trajectory(
     let sampling_frequency_ns =
         round_dp((duration_ps / PS_PER_NS) / (num_frames - 1.), 3) as f32;
 
-    Ok((duration_ps, sampling_frequency_ns, num_frames))
+    Ok(Measurement {
+        duration_ps,
+        sampling_frequency_ns,
+        num_frames,
+        nstxout,
+    })
+}
+
+/// Reject a measured frame spacing that implies an impossible output frequency.
+///
+/// Only called when a measurement is about to be *believed* -- when the source
+/// had a real time axis, or we could not establish that it did not. In the
+/// second case this is the only thing standing between cpptraj's default
+/// 1 ps/frame and the public record, which is where it stood for a year on
+/// MDR00048669 and on every DCD-sourced directory ingested since.
+fn validate_measured_spacing(
+    trajectory_file_name: &str,
+    m: &Measurement,
+    integration_timestep_fs: u32,
+) -> Result<()> {
+    if m.nstxout >= NSTXOUT_MIN {
+        return Ok(());
+    }
+
+    let sampling_ps = m.duration_ps / (m.num_frames - 1.);
+    bail!(
+        "{trajectory_file_name}: measured frame spacing of {sampling_ps} ps \
+         against the declared {integration_timestep_fs} fs integration \
+         timestep implies a frame saved every {:.0} simulation steps, below \
+         the plausible minimum of {NSTXOUT_MIN:.0}. That is the signature of a \
+         spacing that was never measured: converting a trajectory whose source \
+         carries no time axis stamps cpptraj's default of 1 ps per frame onto \
+         the output, and it is indistinguishable from a real measurement by \
+         the time it is read back. Add `sampling_frequency_ps` to \
+         mdrepo-metadata.toml (the output frequency times the integration \
+         timestep) and re-run.",
+        m.nstxout
+    )
 }
 
 // --------------------------------------------------
@@ -2380,5 +2523,105 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    // ── source frame-spacing recovery ────────────────────────────────────────
+
+    #[test]
+    fn sampling_marker_parses_the_recovered_spacing() {
+        // The real line the wrapper prints for MDR00084214's DCD, in the
+        // company of the conversion chatter it is buried in.
+        let stdout = "Reading 'trajectory.dcd'\n\
+                      [mdrepo] source_has_time_axis=unknown\n\
+                      [mdrepo] source_sampling_ps=100.00000029814058\n";
+        assert_eq!(parse_sampling_marker(stdout), Some(100.00000029814058));
+    }
+
+    #[test]
+    fn sampling_marker_is_none_when_nothing_was_recovered() {
+        assert_eq!(parse_sampling_marker(""), None);
+        assert_eq!(
+            parse_sampling_marker("[mdrepo] source_sampling_ps=unknown\n"),
+            None
+        );
+        // No marker at all: an older wrapper, or a run that skipped conversion.
+        assert_eq!(
+            parse_sampling_marker("[mdrepo] source_has_time_axis=true\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn sampling_marker_rejects_values_that_would_poison_the_arithmetic() {
+        // Each of these parses as a float and would divide through the
+        // duration calculation to produce a plausible-looking zero or NaN.
+        for bad in ["0", "-100", "NaN", "inf", "-0.0"] {
+            assert_eq!(
+                parse_sampling_marker(&format!("[mdrepo] source_sampling_ps={bad}\n")),
+                None,
+                "should have rejected {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn sampling_marker_takes_the_last_line_when_repeated() {
+        // Two trajectories converted in one wrapper run: the marker belongs to
+        // whichever was read last, matching parse_time_axis_marker.
+        let stdout = "[mdrepo] source_sampling_ps=10.0\n\
+                      [mdrepo] source_sampling_ps=100.0\n";
+        assert_eq!(parse_sampling_marker(stdout), Some(100.0));
+    }
+
+    // ── nstxout floor ────────────────────────────────────────────────────────
+
+    fn measurement(sampling_ps: f64, num_frames: f64, timestep_fs: u32) -> Measurement {
+        let duration_ps = (num_frames - 1.) * sampling_ps;
+        Measurement {
+            duration_ps,
+            sampling_frequency_ns: round_dp(
+                (duration_ps / PS_PER_NS) / (num_frames - 1.),
+                3,
+            ) as f32,
+            num_frames,
+            nstxout: sampling_ps / (timestep_fs as f64 / FS_PER_PS),
+        }
+    }
+
+    #[test]
+    fn measured_spacing_rejects_cpptrajs_fabricated_one_ps_per_frame() {
+        // Exactly MDR00084214: 2000 frames stamped 1 ps apart by conversion,
+        // against the 4 fs timestep its header declares. nstxout = 250.
+        let m = measurement(1.0, 2000., 4);
+        let err = validate_measured_spacing("trajectory.dcd", &m, 4)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("250"), "{err}");
+        assert!(err.contains("sampling_frequency_ps"), "{err}");
+
+        // And the 2 fs case, which is 73 of the 78 affected prod simulations.
+        assert!(
+            validate_measured_spacing("t.dcd", &measurement(1.0, 500., 2), 2).is_err()
+        );
+    }
+
+    #[test]
+    fn measured_spacing_accepts_a_real_trajectory() {
+        // The same file measured correctly: 100 ps/frame at 4 fs is nstxout
+        // 25000, which is also exactly the NSAVC its DCD header carries.
+        let m = measurement(100.0, 2000., 4);
+        assert_eq!(m.nstxout, 25000.);
+        assert!(validate_measured_spacing("trajectory.dcd", &m, 4).is_ok());
+    }
+
+    #[test]
+    fn measured_spacing_floor_is_inclusive_at_the_boundary() {
+        // 1 ps/frame against a 1 fs timestep lands on exactly 1e3 and is
+        // allowed through -- a real limit of the floor, not an oversight, and
+        // the reason the source header is read at all. Kept as a test so the
+        // gap stays visible if anyone tightens the band later.
+        let m = measurement(1.0, 1000., 1);
+        assert_eq!(m.nstxout, NSTXOUT_MIN);
+        assert!(validate_measured_spacing("t.dcd", &m, 1).is_ok());
     }
 }
