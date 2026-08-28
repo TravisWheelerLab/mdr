@@ -2061,6 +2061,7 @@ dependencies = [
  "dotenvy",
  "libmdrepo",
  "mdr-db",
+ "validator",
 ]
 
 [[package]]

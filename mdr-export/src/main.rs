@@ -11,6 +11,7 @@ use std::{
     fs::{self, File},
     io::Write,
 };
+use validator::Validate;
 
 const DEFAULT_ORCID: &str = "0000-0000-0000-0000";
 
@@ -71,6 +72,18 @@ fn run(args: Args) -> Result<()> {
                 get_sim_summary(&mut conn, sim_id).and_then(|s| s.to_json())
             } else {
                 get_sim(&mut conn, sim_id).and_then(|meta| {
+                    // Deliberately HERE and not inside get_sim: get_sim_summary
+                    // calls get_sim, so validating in there would put this in
+                    // front of the nightly public-json export too -- and
+                    // public-json emits Summary, a different shape, so Meta's
+                    // rules are not the right assertion for it.
+                    //
+                    // validate() and not Meta::check(): check() adds rules that
+                    // are not Meta invariants (the software-version table, and
+                    // "Missing PDB and Uniprot IDs", which is true of 160
+                    // simulations on prod). Those are ingest-time questions,
+                    // not "is this document well-formed".
+                    meta.validate()?;
                     if args.format == FileFormat::Json {
                         meta.to_json()
                     } else {
@@ -122,8 +135,11 @@ fn keep_visible(conn: &mut PgConnection, requested: Vec<i64>) -> Result<Vec<i64>
 }
 
 // --------------------------------------------------
+/// `Some("")` and `Some("   ")` both FAIL Meta's NOT_WHITESPACE_REGEX, while
+/// `None` is skipped entirely -- so a blank column has to become None, not a
+/// blank string. Trims rather than testing is_empty for that reason.
 fn empty_to_none(val: Option<String>) -> Option<String> {
-    val.filter(|v| !v.is_empty())
+    val.filter(|v| !v.trim().is_empty())
 }
 
 // --------------------------------------------------
@@ -364,13 +380,19 @@ fn get_sim(conn: &mut PgConnection, sim_id: i64) -> Result<metadata::Meta> {
         software_name: software.name,
         software_version: software.version.unwrap_or_default(),
         mdrepo_id: Some(format!("MDR{sim_id:08}")),
-        description: sim.description,
+        // Every one of these carries NOT_WHITESPACE_REGEX on Meta, where
+        // Some("") FAILS validation and None is skipped entirely. The columns
+        // hold "" rather than NULL for 925 simulations (forcefield_comments
+        // 925, forcefield 57), so passing them through raw makes the exporter
+        // emit a key its own validator rejects. empty_to_none already existed
+        // for the nested contributor fields; it belongs here too.
+        description: empty_to_none(sim.description),
         toml_version: Some(constants::METADATA_TOML_VERSION),
-        alias: sim.alias,
-        run_commands: sim.run_commands,
-        forcefield: sim.forcefield,
-        forcefield_comments: sim.forcefield_comments,
-        protonation_method: sim.protonation_method,
+        alias: empty_to_none(sim.alias),
+        run_commands: empty_to_none(sim.run_commands),
+        forcefield: empty_to_none(sim.forcefield),
+        forcefield_comments: empty_to_none(sim.forcefield_comments),
+        protonation_method: empty_to_none(sim.protonation_method),
         pdb_id: pdb.map(|val| val.pdb_id),
         uniprot_ids: if uniprot_ids.is_empty() {
             None
