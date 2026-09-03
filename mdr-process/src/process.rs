@@ -2019,7 +2019,10 @@ pub fn get_uniprot_entry(uniprot_id: &str) -> Result<UniprotEntry> {
     let desc = uniprot.protein_description;
     let name = if let Some(name) = desc.recommended_name {
         name.full_name.value
-    } else if let Some(name) = desc.submission_names {
+    } else if let Some(name) = desc
+        .submission_names
+        .and_then(|names| names.into_iter().next())
+    {
         name.full_name.value
     } else {
         bail!(r#"Uniprot entry for "{uniprot_id}" has no names"#)

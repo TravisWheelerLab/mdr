@@ -1,0 +1,26 @@
+{
+  "proteinDescription": {
+    "submissionNames": [
+      {
+        "fullName": {
+          "evidences": [
+            {
+              "evidenceCode": "ECO:0000313",
+              "source": "Ensembl",
+              "id": "ENSP00000379214.3"
+            }
+          ],
+          "value": "Zinc finger protein 248"
+        }
+      }
+    ],
+    "flag": "Fragment"
+  },
+  "sequence": {
+    "value": "MNKSQEQVSFKDVCVDFTQEEWYLLDPAQKILYRDVILENYSNLVSVGYCITKPEVIFKIEQGEEPWILEKGFPSQCHPERKWKVDDVLESSQENEDDHF",
+    "length": 100,
+    "molWeight": 11873,
+    "crc64": "82561627258068B4",
+    "md5": "891D4C37C252B3573DC3670710FE84E9"
+  }
+}

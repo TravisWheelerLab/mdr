@@ -387,7 +387,7 @@ pub struct UniprotProteinDesc {
     pub recommended_name: Option<UniprotProteinFullName>,
 
     #[serde(alias = "submissionNames")]
-    pub submission_names: Option<UniprotProteinFullName>,
+    pub submission_names: Option<Vec<UniprotProteinFullName>>,
 }
 
 // --------------------------------------------------
@@ -1003,7 +1003,7 @@ pub struct ImportJsonArgs<'a> {
 // --------------------------------------------------
 #[cfg(test)]
 mod tests {
-    use super::{DoiAuthor, DoiPaper};
+    use super::{DoiAuthor, DoiPaper, UniprotResponse};
     use anyhow::Result;
     use std::fs;
 
@@ -1114,6 +1114,25 @@ mod tests {
                 Some("The MDRepo Consortium".to_string()),
                 None,
             ]
+        );
+        Ok(())
+    }
+
+    // Regression: UniProt sends `submissionNames` as a list, not an object,
+    // for entries with no `recommendedName` (e.g. TrEMBL-only, such as
+    // B1AL40). This used to fail to deserialize and drop the entry entirely.
+    #[test]
+    fn test_uniprot_response_submission_names_list() -> Result<()> {
+        let text = fs::read_to_string("tests/inputs/uniprot-trembl.json")?;
+        let uniprot: UniprotResponse = serde_json::from_str(&text)?;
+        assert!(uniprot.protein_description.recommended_name.is_none());
+        let submission_names = uniprot
+            .protein_description
+            .submission_names
+            .expect("submission names");
+        assert_eq!(
+            submission_names[0].full_name.value,
+            "Zinc finger protein 248"
         );
         Ok(())
     }
