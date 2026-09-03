@@ -470,7 +470,6 @@ pub struct PubUpdate {
 #[diesel(belongs_to(Software))]
 #[diesel(belongs_to(Ticket, foreign_key = md_repo_ticket_id))]
 #[diesel(belongs_to(User, foreign_key = created_by_id))]
-#[diesel(belongs_to(ReplicateGroup))]
 #[diesel(belongs_to(Pdb))]
 pub struct Simulation {
     pub id: i64,
@@ -492,7 +491,6 @@ pub struct Simulation {
     pub rmsf_values: Option<Vec<f64>>,
     pub is_placeholder: bool,
     pub created_by_id: Option<i64>,
-    pub replicate_group_id: Option<i64>,
     pub unique_file_hash_string: Option<String>,
     pub forcefield: Option<String>,
     pub forcefield_comments: Option<String>,
@@ -651,46 +649,6 @@ pub struct NewSimulationCollection {
 pub struct SimulationCollectionUpdate {
     pub simulation_id: Option<i64>,
     pub collection_id: Option<i64>,
-}
-
-// ── md_replicate_group ────────────────────────────────────────────────────────
-
-#[derive(
-    Debug,
-    Queryable,
-    Selectable,
-    Identifiable,
-    Associations,
-    Serialize,
-    Deserialize,
-    ToSchema,
-)]
-#[diesel(table_name = md_replicate_group)]
-#[diesel(belongs_to(User))]
-pub struct ReplicateGroup {
-    pub id: i64,
-    pub replicate_key: String,
-    pub user_id: i64,
-    pub description: String,
-    pub sample_mdrepo_id: String,
-}
-
-#[derive(Debug, Insertable, Deserialize)]
-#[diesel(table_name = md_replicate_group)]
-pub struct NewReplicateGroup {
-    pub replicate_key: String,
-    pub user_id: i64,
-    pub description: String,
-    pub sample_mdrepo_id: String,
-}
-
-#[derive(Debug, AsChangeset, Default, Deserialize)]
-#[diesel(table_name = md_replicate_group)]
-pub struct ReplicateGroupUpdate {
-    pub replicate_key: Option<String>,
-    pub user_id: Option<i64>,
-    pub description: Option<String>,
-    pub sample_mdrepo_id: Option<String>,
 }
 
 // ── md_simulation_uniprot ─────────────────────────────────────────────────────

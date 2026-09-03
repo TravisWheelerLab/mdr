@@ -152,7 +152,6 @@ diesel::table! {
         rmsf_values -> Nullable<Array<Float8>>,
         is_placeholder -> Bool,
         created_by_id -> Nullable<Int8>,
-        replicate_group_id -> Nullable<Int8>,
         unique_file_hash_string -> Nullable<Text>,
         forcefield -> Nullable<Text>,
         forcefield_comments -> Nullable<Text>,
@@ -188,17 +187,6 @@ diesel::table! {
         id -> Int8,
         simulation_id -> Int8,
         collection_id -> Int8,
-    }
-}
-
-diesel::table! {
-    use diesel::sql_types::*;
-    md_replicate_group (id) {
-        id -> Int8,
-        replicate_key -> Varchar,
-        user_id -> Int8,
-        description -> Text,
-        sample_mdrepo_id -> Varchar,
     }
 }
 
@@ -397,7 +385,6 @@ diesel::allow_tables_to_appear_in_same_query!(
     md_simulation,
     md_simulation_collection,
     md_simulation_pub,
-    md_replicate_group,
     md_simulation_uniprot,
     md_software,
     md_solute,

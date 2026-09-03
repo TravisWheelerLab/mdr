@@ -557,8 +557,8 @@ impl Meta {
 /// -- it exists for the nightly public JSON export, not for round-tripping
 /// submissions, so unlike `Meta` it carries no `Deserialize` or `Validate`.
 /// Deliberately excludes contributions, rmsd_values, rmsf_values,
-/// replicate_group, uploaded_files, and processed_files, which the public
-/// API serializer includes but which would needlessly bloat 50K+ files.
+/// uploaded_files, and processed_files, which the public API serializer
+/// includes but which would needlessly bloat 50K+ files.
 #[derive(Debug, Serialize)]
 pub struct Summary {
     pub id: i64,
@@ -1819,7 +1819,6 @@ mod tests {
             "contributions",
             "rmsd_values",
             "rmsf_values",
-            "replicate_group",
             "uploaded_files",
             "processed_files",
         ] {
