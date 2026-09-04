@@ -185,6 +185,46 @@ fn seed_download_instance(c: &mut PgConnection, sim_id: i64) -> i64 {
     .id
 }
 
+fn seed_replicate(c: &mut PgConnection, sim_id: i64, name: &str) -> i64 {
+    ops::insert_replicate(
+        c,
+        NewReplicate {
+            trajectory_file_name: name.into(),
+            simulation_id: sim_id,
+        },
+    )
+    .expect("insert replicate")
+    .id
+}
+
+/// Link a simulation to a fresh accession. `acc` must be distinct per test:
+/// `md_uniprot` is unique on the accession and tests run in parallel.
+fn seed_simulation_uniprot(c: &mut PgConnection, sim_id: i64, acc: &str) -> (i64, i64) {
+    let uniprot = ops::insert_uniprot(
+        c,
+        NewUniprot {
+            uniprot_id: acc.into(),
+            name: format!("{acc}_HUMAN"),
+            amino_length: 42,
+            sequence: "MTEST".into(),
+        },
+    )
+    .expect("insert uniprot")
+    .id;
+
+    let link = ops::insert_simulation_uniprot(
+        c,
+        NewSimulationUniprot {
+            simulation_id: sim_id,
+            uniprot_id: uniprot,
+        },
+    )
+    .expect("insert simulation uniprot")
+    .id;
+
+    (uniprot, link)
+}
+
 /// Set the alias / creator / file-hash keys the alias & hash finders look up.
 fn set_sim_keys(
     c: &mut PgConnection,
@@ -890,6 +930,62 @@ fn delete_uploaded_files_removes_files_and_links_only_for_sim() {
         ops::list_download_uploaded_files(&mut c, Some(di), None, true, None, None)
             .unwrap();
     assert_eq!(links, 0, "download link removed");
+}
+
+#[test]
+fn delete_replicates_removes_rows_only_for_sim() {
+    let mut c = conn_or_skip!();
+    let sim = seed_sim(&mut c);
+    let other_sim = seed_sim(&mut c);
+    let r1 = seed_replicate(&mut c, sim, "old_R1.xtc");
+    let r2 = seed_replicate(&mut c, sim, "old_R2.xtc");
+    let other_r = seed_replicate(&mut c, other_sim, "keep_R1.xtc");
+
+    let n = ops::delete_replicates_for_simulation(&mut c, sim).unwrap();
+    assert_eq!(n, 2, "both replicates deleted");
+    assert!(ops::get_replicate(&mut c, r1).is_err(), "first row gone");
+    assert!(ops::get_replicate(&mut c, r2).is_err(), "second row gone");
+    assert!(
+        ops::get_replicate(&mut c, other_r).is_ok(),
+        "other sim's replicate untouched"
+    );
+}
+
+#[test]
+fn delete_replicates_on_a_sim_with_none_is_a_noop() {
+    let mut c = conn_or_skip!();
+    let sim = seed_sim(&mut c);
+
+    let n = ops::delete_replicates_for_simulation(&mut c, sim).unwrap();
+    assert_eq!(n, 0, "nothing to delete, and no error");
+}
+
+#[test]
+fn delete_uniprots_removes_links_but_keeps_the_accession() {
+    let mut c = conn_or_skip!();
+    let sim = seed_sim(&mut c);
+    let other_sim = seed_sim(&mut c);
+    let (acc, link) = seed_simulation_uniprot(&mut c, sim, "T00001");
+    let (other_acc, other_link) = seed_simulation_uniprot(&mut c, other_sim, "T00002");
+
+    let n = ops::delete_uniprots_for_simulation(&mut c, sim).unwrap();
+    assert_eq!(n, 1, "one link deleted");
+    assert!(
+        ops::get_simulation_uniprot(&mut c, link).is_err(),
+        "link gone"
+    );
+    assert!(
+        ops::get_simulation_uniprot(&mut c, other_link).is_ok(),
+        "other sim's link untouched"
+    );
+
+    // The accessions are shared across simulations -- clearing a simulation's
+    // links must not delete the protein records themselves.
+    assert!(
+        ops::get_uniprot(&mut c, acc).is_ok(),
+        "accession kept, only the link was cleared"
+    );
+    assert!(ops::get_uniprot(&mut c, other_acc).is_ok(), "other accession kept");
 }
 
 // ── get_visible_simulation_ids ────────────────────────────────────────────────

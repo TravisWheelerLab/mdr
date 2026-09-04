@@ -102,6 +102,17 @@ pub fn import_simulation(
                 let n = ops::delete_uploaded_files_for_simulation(conn, sim_id)?;
                 debug!("Removed {n} previous uploaded file(s)");
             }
+
+            // Not gated on `replace_original_files`: both of these are
+            // find-or-insert below, so leaving them would keep rows the new
+            // metadata no longer names. `md_replicate` is what mdr-export
+            // publishes `trajectory_file_names` from, so a stale row there is
+            // visible, not just stored.
+            let n = ops::delete_replicates_for_simulation(conn, sim_id)?;
+            debug!("Removed {n} previous replicate(s)");
+
+            let n = ops::delete_uniprots_for_simulation(conn, sim_id)?;
+            debug!("Removed {n} previous uniprot link(s)");
         }
 
         for file in &sim.original_files {

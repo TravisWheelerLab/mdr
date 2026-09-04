@@ -2453,3 +2453,39 @@ pub fn delete_uploaded_files_for_simulation(
     diesel::delete(uf::md_uploaded_file.filter(uf::simulation_id.eq(sim_id)))
         .execute(conn)
 }
+
+/// Delete a simulation's `md_replicate` rows. Used on the reprocess path.
+///
+/// `upsert_replicate` is find-or-insert, so without this a reprocess whose
+/// metadata names a different trajectory leaves the old row in place — and
+/// `mdr-export` builds `trajectory_file_names` from this table rather than
+/// from `is_primary`, so the stale name is published, not merely stored.
+///
+/// Nothing links to `md_replicate`, so there is no link table to clear first.
+pub fn delete_replicates_for_simulation(
+    conn: &mut PgConnection,
+    sim_id: i64,
+) -> QueryResult<usize> {
+    use crate::schema::md_replicate::dsl as r;
+
+    diesel::delete(r::md_replicate.filter(r::simulation_id.eq(sim_id)))
+        .execute(conn)
+}
+
+/// Delete a simulation's `md_simulation_uniprot` links. Used on the reprocess
+/// path.
+///
+/// This clears the join rows only; the `md_uniprot` accessions they point at
+/// are shared across simulations and are left alone. `upsert_uniprot` is
+/// find-or-insert like the replicate case, so a correction made between two
+/// uploads otherwise leaves both the corrected and the mistaken link behind —
+/// simulation 84214 carried a stale `P01892` that way.
+pub fn delete_uniprots_for_simulation(
+    conn: &mut PgConnection,
+    sim_id: i64,
+) -> QueryResult<usize> {
+    use crate::schema::md_simulation_uniprot::dsl as su;
+
+    diesel::delete(su::md_simulation_uniprot.filter(su::simulation_id.eq(sim_id)))
+        .execute(conn)
+}
