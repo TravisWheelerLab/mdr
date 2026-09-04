@@ -4,6 +4,52 @@ Notable user-facing changes to `mdr-meta`. Each entry here becomes the
 GitHub release note for that version (see `.github/workflows/release.yml`)
 -- write it before tagging, not after.
 
+## 0.3.23
+
+### Behaviour change: a wildcard in a filename is now an error
+
+`check` now rejects `*`, `?` or `[` in any filename the metadata refers
+to: `structure_file_name`, `topology_file_name`, every
+`trajectory_file_names` entry, and every `additional_files.file_name`.
+
+```toml
+trajectory_file_names = ["Pro_lig*.mdc"]
+```
+
+```
+trajectory_file_names[1]: filename "Pro_lig*.mdc" contains the wildcard
+'*'; globs are not expanded, so every file must be listed explicitly
+```
+
+**Metadata that passed `check` before may now fail it.** A file like the
+one above used to exit `0`; it now exits `1`. If you have been relying on
+a pattern to stand for a set of files, list the files instead.
+
+Nothing has ever expanded these patterns. The name was always used
+literally, so a pattern simply failed later, during import, as
+
+```
+Missing file "Pro_lig*.mdc" referenced by metadata: No such file or
+directory (os error 2)
+```
+
+which reads like a missing file rather than an unsupported spelling. This
+moves the report to `check`, where it can be acted on before any work
+starts, and says what is actually wrong.
+
+In practice the pattern has also been a reliable sign that the data is
+absent: in every bundle where we have seen it, the generator wrote it
+precisely because it had no trajectories to list, and the archive
+contained none.
+
+### Unchanged
+
+- Every other field and check behaves as before.
+- `check`'s exit codes (`0`/`1`/`2`, see the 0.3.17 notes below) are
+  unchanged; a wildcard is reported as an ordinary validation error.
+- A filename with no wildcard is unaffected, including names that contain
+  digits, dots or dashes.
+
 ## 0.3.22
 
 ### New: `collections`
