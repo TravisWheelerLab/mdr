@@ -315,7 +315,8 @@ fn run_push(
     let output = cmd.output()?;
     if !output.status.success() {
         bail!(
-            "Command failed: {cmd:?}\n{}",
+            "Command failed ({}): {cmd:?}\n{}",
+            output.status,
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -382,7 +383,8 @@ pub fn make_thumbnail(
 
         if !output.status.success() {
             bail!(
-                "Command failed: {cmd:?}\n{}",
+                "Command failed ({}): {cmd:?}\n{}",
+                output.status,
                 String::from_utf8_lossy(&output.stderr)
             );
         }
@@ -500,7 +502,8 @@ pub fn process_trajectory(args: ProcessTrajectoryArgs) -> Result<ProcessedTrajec
             let output = cmd.output()?;
             if !output.status.success() {
                 bail!(
-                    "Command failed: {cmd:?}\n{}",
+                    "Command failed ({}): {cmd:?}\n{}",
+                    output.status,
                     String::from_utf8_lossy(&output.stderr)
                 );
             }
@@ -568,7 +571,8 @@ pub fn process_trajectory(args: ProcessTrajectoryArgs) -> Result<ProcessedTrajec
         let output = cmd.output()?;
         if !output.status.success() {
             bail!(
-                "Command failed: {cmd:?}\n{}",
+                "Command failed ({}): {cmd:?}\n{}",
+                output.status,
                 String::from_utf8_lossy(&output.stderr)
             );
         }
@@ -760,7 +764,8 @@ pub fn get_rmsd_rmsf(
 
         if !output.status.success() {
             bail!(
-                "Command failed: {cmd:?}\n{}",
+                "Command failed ({}): {cmd:?}\n{}",
+                output.status,
                 String::from_utf8_lossy(&output.stderr)
             );
         }
@@ -854,7 +859,8 @@ pub fn blast_uniprot(
 
         if !output.status.success() {
             bail!(
-                "Command failed: {cmd:?}\n{}",
+                "Command failed ({}): {cmd:?}\n{}",
+                output.status,
                 String::from_utf8_lossy(&output.stderr)
             );
         }
@@ -931,7 +937,8 @@ pub fn get_sequence(
 
         if !output.status.success() {
             bail!(
-                "Command failed: {cmd:?}\n{}",
+                "Command failed ({}): {cmd:?}\n{}",
+                output.status,
                 String::from_utf8_lossy(&output.stderr)
             );
         }
@@ -975,7 +982,8 @@ pub fn sample_trajectory(
 
         if !output.status.success() {
             bail!(
-                "Command failed: {cmd:?}\n{}",
+                "Command failed ({}): {cmd:?}\n{}",
+                output.status,
                 String::from_utf8_lossy(&output.stderr)
             );
         }
@@ -1034,7 +1042,8 @@ pub fn make_trajectory_tarballs(
             let output = cmd.output()?;
             if !output.status.success() {
                 bail!(
-                    "Command failed: {cmd:?}\n{}",
+                    "Command failed ({}): {cmd:?}\n{}",
+                    output.status,
                     String::from_utf8_lossy(&output.stderr)
                 );
             }
@@ -1328,7 +1337,8 @@ fn collect_original_files(
             let output = cmd.output()?;
             if !output.status.success() {
                 bail!(
-                    "Command failed: {cmd:?}\n{}",
+                    "Command failed ({}): {cmd:?}\n{}",
+                    output.status,
                     String::from_utf8_lossy(&output.stderr)
                 );
             }
@@ -1564,7 +1574,8 @@ pub fn check_ligand(
     let output = cmd.output()?;
     if !output.status.success() {
         bail!(
-            "Command failed: {cmd:?}\n{}",
+            "Command failed ({}): {cmd:?}\n{}",
+            output.status,
             String::from_utf8_lossy(&output.stderr)
         );
     }
@@ -1763,7 +1774,8 @@ fn frame_times(full_xtc: &Path) -> Result<Vec<f64>> {
 
     if !output.status.success() {
         bail!(
-            "Command failed: {cmd:?}\n{}",
+            "Command failed ({}): {cmd:?}\n{}",
+            output.status,
             String::from_utf8_lossy(&output.stderr)
         );
     }
