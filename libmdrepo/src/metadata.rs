@@ -247,6 +247,10 @@ impl Meta {
                 messages.push(msg);
             }
 
+            if let Some(msg) = Self::check_no_wildcard(fieldname, filename) {
+                messages.push(msg);
+            }
+
             file_count
                 .entry(filename.to_string())
                 .and_modify(|count| *count += 1)
@@ -255,6 +259,13 @@ impl Meta {
 
         for (i, filename) in self.trajectory_file_names.iter().enumerate() {
             if let Some(msg) = Self::check_has_extension(
+                &format!("trajectory_file_names[{}]", i + 1),
+                filename,
+            ) {
+                messages.push(msg);
+            }
+
+            if let Some(msg) = Self::check_no_wildcard(
                 &format!("trajectory_file_names[{}]", i + 1),
                 filename,
             ) {
@@ -272,7 +283,14 @@ impl Meta {
         messages.sort();
 
         if let Some(addl_files) = &self.additional_files {
-            for file in addl_files {
+            for (i, file) in addl_files.iter().enumerate() {
+                if let Some(msg) = Self::check_no_wildcard(
+                    &format!("additional_files[{}].file_name", i + 1),
+                    &file.file_name,
+                ) {
+                    messages.push(msg);
+                }
+
                 file_count
                     .entry(file.file_name.to_string())
                     .and_modify(|count| *count += 1)
@@ -416,6 +434,30 @@ impl Meta {
                 r#"{fieldname}: filename "{filename}" is missing extension"#
             ))
         }
+    }
+
+    /// A wildcard is not a filename. NOTHING in this codebase expands globs
+    /// -- `validate::validate_meta` stats every name from `all_filenames()`
+    /// literally -- so a pattern that reaches that point fails as
+    /// `Missing file "Pro_lig*.mdc" ... No such file or directory`, which
+    /// reads like a lost file rather than an unsupported spelling.
+    ///
+    /// Three DDD bundles (2h3e, 2igy, 2obo) failed exactly that way in the
+    /// 2026-09 prod wave. Their generator emitted the placeholder
+    /// `trajectory_file_names = ["Pro_lig*.mdc"]` in precisely the bundles
+    /// where it had no trajectories to enumerate, so the wildcard is also a
+    /// reliable signal that the data is absent -- healthy bundles list all
+    /// fifty `Pro_lig<N>.mdc` names. Saying so here turns a filesystem
+    /// error into an actionable one, and says it before any work is done.
+    fn check_no_wildcard(fieldname: &str, filename: &str) -> Option<String> {
+        filename
+            .chars()
+            .find(|c| matches!(c, '*' | '?' | '['))
+            .map(|c| {
+                format!(
+                    r#"{fieldname}: filename "{filename}" contains the wildcard '{c}'; globs are not expanded, so every file must be listed explicitly"#
+                )
+            })
     }
 
     pub fn from_file(path: &Path) -> Result<Self> {
@@ -1451,6 +1493,55 @@ mod tests {
         assert!(filenames.contains(&"traj.xtc".to_string()));
         assert!(filenames.contains(&"README.txt".to_string()));
         assert_eq!(filenames.len(), 4);
+    }
+
+    // --- wildcards in referenced filenames ---
+
+    #[test]
+    fn check_no_wildcard_accepts_a_real_filename() {
+        assert!(
+            Meta::check_no_wildcard("trajectory_file_names[1]", "Pro_lig7.mdc")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn check_no_wildcard_rejects_star_question_and_bracket() {
+        for name in ["Pro_lig*.mdc", "Pro_lig?.mdc", "Pro_lig[0-9].mdc"] {
+            let msg = Meta::check_no_wildcard("trajectory_file_names[1]", name)
+                .unwrap_or_else(|| panic!("{name} should be rejected"));
+            assert!(msg.contains("globs are not expanded"), "{msg}");
+            assert!(msg.contains(name), "{msg}");
+        }
+    }
+
+    /// Reproduces 2h3e/2igy/2obo from the 2026-09 DDD prod wave, whose
+    /// generator wrote the pattern instead of enumerating the trajectories.
+    /// Before this check the wildcard passed metadata validation and only
+    /// failed later as a filesystem ENOENT on a name that never existed.
+    #[test]
+    fn wildcard_trajectory_is_reported_by_check() {
+        let mut meta = Meta::example_minimal();
+        meta.trajectory_file_names = vec!["Pro_lig*.mdc".to_string()];
+
+        let errors = meta.check(None);
+        assert!(
+            errors.iter().any(|e| e.contains("globs are not expanded")),
+            "expected a wildcard error, got {errors:?}"
+        );
+    }
+
+    #[test]
+    fn enumerated_trajectories_produce_no_wildcard_error() {
+        let mut meta = Meta::example_minimal();
+        meta.trajectory_file_names =
+            vec!["Pro_lig1.xtc".to_string(), "Pro_lig2.xtc".to_string()];
+
+        let errors = meta.check(None);
+        assert!(
+            !errors.iter().any(|e| e.contains("globs are not expanded")),
+            "unexpected wildcard error in {errors:?}"
+        );
     }
 
     // --- MetaCheckOptions ---
